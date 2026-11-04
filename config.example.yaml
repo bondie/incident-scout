@@ -1,0 +1,79 @@
+# Copy to ~/.config/incident-scout/config.yaml (outside the repository).
+# ${VARIABLES} come from the environment, a .env next to the config, or env_files.
+
+# env_files: [~/secrets/monitoring.env]
+# state_path: ~/.local/share/incident-scout/state.db
+
+# Where telemetry comes from. Either the standard HTTP APIs ...
+source:
+  type: http
+  prometheus_url: http://localhost:9090       # or VictoriaMetrics, e.g. http://vm:8428
+  loki_url: http://localhost:3100
+  alertmanager_url: http://localhost:9093
+  # headers: {Authorization: "Bearer ${METRICS_TOKEN}"}
+
+# ... or an MCP server that wraps them (tool names are configurable):
+# source:
+#   type: mcp
+#   claude_mcp_server: observability   # reuse URL and headers registered in Claude Code
+#   # url: https://mcp.example.com/mcp
+#   # headers: {Authorization: "Bearer ${MCP_TOKEN}"}
+#   tools: {query: vm_query, query_range: vm_query_range, logs: loki_query, alerts: alerts_active}
+
+# $name placeholders in queries, summaries and URLs.
+vars:
+  prod: 'env="prod"'
+
+interval_minutes: 5   # how often launchd runs `scout check`
+blind_after: 3        # consecutive failed checks before "monitoring is blind"
+resolve_after: 2      # consecutive clean checks before an incident is resolved
+
+notify:
+  desktop: true                     # macOS Notification Center
+  # ntfy_url: https://ntfy.sh       # push to the ntfy app on your phone
+  # ntfy_topic: ${NTFY_TOPIC}       # pick a long random topic or use a private server
+  # ntfy_token: ${NTFY_TOKEN}
+  max_per_run: 5                    # more events than this collapse into one summary
+
+# A rule returns only what is wrong, like a Prometheus alerting rule. Summaries use
+# {label} and {value:format} placeholders.
+rules:
+  - name: infra-alert
+    kind: alertmanager
+    match: {severity: critical}                # regex per label
+
+  - name: site-unreachable
+    kind: promql
+    severity: critical
+    query: 'avg_over_time(probe_success{$prod}[15m]) < 0.7'   # catches flapping, not blips
+    summary: '{instance}: only {value:.0%} of probes succeeded in 15 min'
+    key_labels: [instance]
+
+  - name: http-5xx
+    kind: logql
+    severity: critical
+    query: 'sum by (app) (count_over_time({job="nginx", $prod} | json | status >= 500 [5m])) >= 10'
+    summary: '{app}: {value:.0f}x HTTP 5xx in 5 min'
+    key_labels: [app]
+
+  - name: mysql-down
+    kind: promql
+    severity: critical
+    query: 'mysql_up{$prod} == 0'
+    for_runs: 2                                # ignore one-off scrape failures
+    summary: '{instance}: MySQL is down'
+
+  - name: disk-full
+    kind: promql
+    query: 'max by (instance) (1 - node_filesystem_avail_bytes{$prod, fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) > 0.85'
+    summary: '{instance}: disk {value:.0%} full'
+
+  - name: ssl-expiry
+    kind: promql
+    query: 'min by (instance) ((probe_ssl_earliest_cert_expiry{$prod} - time()) / 86400) < 14'
+    summary: '{instance}: certificate expires in {value:.0f} days'
+
+  - name: backup-stale
+    kind: promql
+    query: 'max by (instance) ((time() - backup_last_success_timestamp_seconds{$prod}) / 3600) > 26'
+    summary: '{instance}: last backup {value:.0f} h ago'
