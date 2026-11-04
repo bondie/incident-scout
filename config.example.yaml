@@ -25,6 +25,10 @@ vars:
   prod: 'env="prod"'
 
 interval_minutes: 5   # how often launchd runs `scout check`
+# quiet_hours:          # check less often in a daily window (it may cross midnight)
+#   start: '22:00'
+#   end: '06:00'
+#   interval_minutes: 60
 blind_after: 3        # consecutive failed checks before "monitoring is blind"
 resolve_after: 2      # consecutive clean checks before an incident is resolved
 
