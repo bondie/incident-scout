@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from string import Template
 from typing import Any, cast, get_args
@@ -34,6 +35,27 @@ class NotifyConfig:
 
 
 @dataclass(frozen=True)
+class QuietHours:
+    """A daily window, possibly across midnight, in which checks run less often."""
+
+    start: time
+    end: time
+    interval_minutes: int = 60
+
+    def active(self, moment: datetime) -> bool:
+        clock = moment.astimezone().time()
+        if self.start <= self.end:
+            return self.start <= clock < self.end
+        return clock >= self.start or clock < self.end
+
+    def resting(self, now: datetime, last_run: datetime | None) -> bool:
+        """True when this check should be skipped; a minute of slack absorbs launchd jitter."""
+        if last_run is None or not self.active(now):
+            return False
+        return now - last_run < timedelta(minutes=self.interval_minutes - 1)
+
+
+@dataclass(frozen=True)
 class Config:
     source: Mapping[str, Any]
     rules: list[Rule]
@@ -43,6 +65,7 @@ class Config:
     blind_after: int = 3
     resolve_after: int = 2
     timeout_seconds: int = 120
+    quiet_hours: QuietHours | None = None
 
     def rule(self, name: str) -> Rule:
         for rule in self.rules:
@@ -86,7 +109,28 @@ def load_config(path: Path | None = None) -> Config:
     }
     if raw.get("state_path"):
         options["state_path"] = Path(raw["state_path"]).expanduser()
+    if raw.get("quiet_hours"):
+        options["quiet_hours"] = _quiet_hours(raw["quiet_hours"])
     return Config(source=raw.get("source") or {}, rules=rules, notify=notify, **options)
+
+
+def _quiet_hours(value: Mapping[str, Any]) -> QuietHours:
+    quiet = dict(value)
+    for key in ("start", "end"):
+        if key not in quiet:
+            raise ConfigError(f"quiet_hours.{key} is required, e.g. '22:00'")
+        quiet[key] = _clock(quiet[key], f"quiet_hours.{key}")
+    return cast(QuietHours, _build(QuietHours, quiet, "quiet_hours"))
+
+
+def _clock(value: Any, where: str) -> time:
+    if isinstance(value, int):  # YAML 1.1 reads an unquoted 22:00 as sexagesimal 1320
+        return time(value // 60 % 24, value % 60)
+    try:
+        hours, minutes = str(value).split(":")
+        return time(int(hours), int(minutes))
+    except ValueError as error:
+        raise ConfigError(f"{where} must look like '22:00', got {value!r}") from error
 
 
 def build_telemetry(source: Mapping[str, Any]) -> McpTelemetry | HttpTelemetry:

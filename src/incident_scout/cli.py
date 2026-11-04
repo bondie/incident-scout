@@ -39,6 +39,7 @@ def _parser() -> argparse.ArgumentParser:
     cmd.add_argument(
         "--dry-run", action="store_true", help="print findings, keep state, notify nobody"
     )
+    cmd.add_argument("--force", action="store_true", help="run even during quiet hours")
     cmd.set_defaults(handler=_check)
 
     cmd = commands.add_parser("status", help="open incidents, pending findings and health")
@@ -64,14 +65,22 @@ def _parser() -> argparse.ArgumentParser:
 def _check(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     now = datetime.now(UTC)
-    result = _run(config)
     if args.dry_run:
+        result = _run(config)
         for finding in result.findings:
             print(f"{finding.severity:<8} {finding.rule:<20} {finding.summary}")
         for rule, error in result.errors.items():
             print(f"error    {rule:<20} {error}", file=sys.stderr)
         return 0
     store = Store(config.state_path)
+    last_run = store.health()["last_run"]
+    if (
+        not args.force
+        and config.quiet_hours is not None
+        and config.quiet_hours.resting(now, datetime.fromisoformat(last_run) if last_run else None)
+    ):
+        return 0
+    result = _run(config)
     rules = {rule.name: rule for rule in config.rules}
     events = process(store, result, rules, now, config.blind_after, config.resolve_after)
     for event in events:

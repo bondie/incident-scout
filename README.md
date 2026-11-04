@@ -68,7 +68,10 @@ tail -f ~/Library/Logs/incident-scout.log
 ```
 
 launchd, unlike cron, runs a missed check as soon as the Mac wakes up and never starts a
-second check while one is still running.
+second check while one is still running. With `quiet_hours` (for example 22:00-06:00, every
+60 minutes) checks inside the window are skipped until the interval has passed. Rules then
+see only their own query window once an hour, so keep sustained problems covered by
+range-based rules or Alertmanager. `scout check --force` ignores the window.
 
 ## Rules
 

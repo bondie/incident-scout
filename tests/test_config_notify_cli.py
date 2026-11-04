@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import plistlib
+from dataclasses import replace
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +11,7 @@ import httpx
 import pytest
 
 from incident_scout import cli, launchd
-from incident_scout.config import ConfigError, build_telemetry, load_config
+from incident_scout.config import ConfigError, QuietHours, build_telemetry, load_config
 from incident_scout.models import Event, Series
 from incident_scout.notify import DesktopNotifier, NtfyNotifier, dispatch
 from incident_scout.sources.http import HttpTelemetry
@@ -230,3 +232,58 @@ def test_launchd_agent_and_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert [c[1] for c in calls] == ["bootout", "bootstrap"]
     assert launchd.uninstall(runner=lambda cmd, **_: None)
     assert not launchd.uninstall(runner=lambda cmd, **_: None)
+
+
+def test_quiet_hours_window_crosses_midnight():
+    night = QuietHours(time(22), time(6), 60)
+    late = datetime(2026, 11, 5, 23, 30).astimezone()
+    assert night.active(late)
+    assert night.active(late.replace(hour=5, minute=59))
+    assert not night.active(late.replace(hour=6))
+    assert not night.active(late.replace(hour=21, minute=59))
+    lunch = QuietHours(time(12), time(13))
+    assert lunch.active(late.replace(hour=12, minute=30))
+    assert not lunch.active(late.replace(hour=13))
+
+
+def test_quiet_hours_rest_between_hourly_checks():
+    night = QuietHours(time(22), time(6), 60)
+    late = datetime(2026, 11, 5, 23, 30).astimezone()
+    assert not night.resting(late, None)
+    assert night.resting(late, late - timedelta(minutes=30))
+    assert not night.resting(late, late - timedelta(minutes=59, seconds=30))
+    assert not night.resting(late.replace(hour=12), late - timedelta(minutes=5))
+
+
+def test_quiet_hours_config_accepts_unquoted_times(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text("quiet_hours: {start: 22:00, end: '06:30', interval_minutes: 60}\n")
+    assert load_config(path).quiet_hours == QuietHours(time(22), time(6, 30), 60)
+    path.write_text("quiet_hours: {start: soon, end: '06:00'}\n")
+    with pytest.raises(ConfigError, match="must look like"):
+        load_config(path)
+    path.write_text("quiet_hours: {end: '06:00'}\n")
+    with pytest.raises(ConfigError, match="start is required"):
+        load_config(path)
+
+
+class AlwaysQuiet(QuietHours):
+    def active(self, moment: datetime) -> bool:
+        return True
+
+
+def test_cli_check_rests_during_quiet_hours(
+    fake_world: FakeTelemetry,
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    quiet = replace(load_config(config_path), quiet_hours=AlwaysQuiet(time(0), time(0), 60))
+    monkeypatch.setattr(cli, "load_config", lambda _path: quiet)
+    args = ["--config", str(config_path), "check"]
+    assert cli.main(args) == 0
+    assert "check:" in capsys.readouterr().out
+    assert cli.main(args) == 0
+    assert capsys.readouterr().out == ""
+    assert cli.main([*args, "--force"]) == 0
+    assert "check:" in capsys.readouterr().out
