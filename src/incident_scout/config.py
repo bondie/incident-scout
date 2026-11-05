@@ -54,6 +54,18 @@ class InvestigatorConfig:
 
 
 @dataclass(frozen=True)
+class TicketsConfig:
+    """When to propose a ticket for the PM, and where to send the proposal."""
+
+    teams_url: str | None = None
+    after_minutes: int = 30
+    recurring: int = 3
+    recurring_days: int = 7
+    max_per_hour: int = 4
+    port: int = 8765
+
+
+@dataclass(frozen=True)
 class QuietHours:
     """A daily window, possibly across midnight, in which checks run less often."""
 
@@ -87,6 +99,7 @@ class Config:
     timeout_seconds: int = 120
     quiet_hours: QuietHours | None = None
     investigator: InvestigatorConfig | None = None
+    tickets: TicketsConfig | None = None
 
     def rule(self, name: str) -> Rule:
         for rule in self.rules:
@@ -142,6 +155,10 @@ def load_config(path: Path | None = None) -> Config:
         options["quiet_hours"] = _quiet_hours(raw["quiet_hours"])
     if raw.get("investigator"):
         options["investigator"] = _investigator(raw["investigator"], variables, sources)
+    if raw.get("tickets"):
+        if "investigator" not in options:
+            raise ConfigError("tickets need the investigator section, which runs the model")
+        options["tickets"] = _build(TicketsConfig, raw["tickets"], "tickets")
     named = {name: value for name, value in sources.items() if name != DEFAULT}
     return Config(source=sources[DEFAULT], rules=rules, sources=named, notify=notify, **options)
 

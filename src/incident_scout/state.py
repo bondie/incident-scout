@@ -57,7 +57,18 @@ CREATE INDEX IF NOT EXISTS events_by_incident ON events (incident_id);
 CREATE INDEX IF NOT EXISTS events_by_time ON events (at);
 """
 # Columns added after the first release; existing databases get them on open.
-INCIDENT_COLUMNS = ("diagnosis", "diagnosed_at", "evidence", "review", "reviewed_at")
+INCIDENT_COLUMNS = (
+    "diagnosis",
+    "diagnosed_at",
+    "evidence",
+    "review",
+    "reviewed_at",
+    "proposal",
+    "proposed_at",
+    "proposal_token",
+    "decision",
+    "decided_at",
+)
 
 
 def iso(moment: datetime) -> str:
@@ -128,6 +139,35 @@ class Store:
                 "UPDATE incidents SET review = ?, reviewed_at = ? WHERE id = ?",
                 (review, iso(now), incident_id),
             )
+
+    def save_proposal(self, incident_id: int, proposal: str, token: str, now: datetime) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE incidents SET proposal = ?, proposal_token = ?, proposed_at = ?, "
+                "decision = NULL, decided_at = NULL WHERE id = ?",
+                (proposal, token, iso(now), incident_id),
+            )
+
+    def decide(self, incident_id: int, decision: str, now: datetime) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE incidents SET decision = ?, decided_at = ? WHERE id = ?",
+                (decision, iso(now), incident_id),
+            )
+
+    def proposals_since(self, moment: datetime) -> int:
+        row = self.db.execute(
+            "SELECT COUNT(*) FROM incidents WHERE proposed_at >= ?", (iso(moment),)
+        ).fetchone()
+        return int(row[0])
+
+    def same_problem(self, fingerprint: str, since: datetime) -> list[sqlite3.Row]:
+        """Incidents of one rule and key opened since a moment, newest first."""
+        return self.db.execute(
+            "SELECT * FROM incidents WHERE fingerprint = ? AND opened_at >= ? "
+            "ORDER BY opened_at DESC",
+            (fingerprint, iso(since)),
+        ).fetchall()
 
     def record(self, events: Iterable[Event], now: datetime) -> None:
         with self.db:

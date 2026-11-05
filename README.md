@@ -214,6 +214,29 @@ its cause when the verdict is `correct`.
 `--keywords` gives the terms a right cause has to name: each option is one group of
 synonyms, and every group must match, the same as in the case files.
 
+### Should this become a ticket?
+
+Some incidents need a developer's work and a ticket for the project manager; most do not.
+With a `tickets` section, an incident that lasts (30 minutes by default) or keeps coming back
+(the third time in 7 days) gets a **ticket proposal**: the model reads the incident, how often
+the same problem happened, the diagnosis and the evidence, and recommends one of
+*create a ticket*, *no ticket needed*, or *already in ticket X* (only for a similar ticket of
+the same shop). It also drafts the ticket for the PM in JIRA markup: what happens and since
+when, how often, the impact on customers, the evidence and what to check first.
+
+The proposal arrives as a card in a Microsoft Teams channel, through a Workflows webhook
+("Send webhook alerts to a channel", triggered by *anyone*, since the monitor does not sign
+in). **Approve** and **Reject** open a small page served on your machine (`scout serve`,
+installed next to the checks by `scout install`): it records the decision and shows the
+ticket text to copy for the PM. Nothing reaches the PM without a person approving it, and
+every link carries a random token, so the buttons do nothing for anyone else in the channel.
+
+```bash
+uv run scout propose 12                 # a proposal now, whatever its age; --no-send prints it
+uv run scout decide 12 approve          # the same decision without Teams
+uv run scout show 12                    # timeline, diagnosis, proposal and decision
+```
+
 ### Choosing a model
 
 `scout eval` replays frozen evidence packs with known causes against any number of models.
@@ -299,6 +322,8 @@ uvx pre-commit install       # ruff, mypy and gitleaks on every commit
   expiring certificate). It would measure detection latency and false alarms end to end.
 - Comparing local models with a hosted model (Claude) on the same evidence packs.
 - Reminders for long-open critical incidents, a systemd timer for Linux.
+- Approved proposals straight into JIRA, with the PM as reporter, once the drafts prove
+  reliable.
 
 ## License
 

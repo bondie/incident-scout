@@ -14,11 +14,12 @@ from typing import Any
 
 import yaml
 
-from . import launchd, triage
+from . import launchd, server, teams, triage
 from .config import (
     Config,
     ConfigError,
     InvestigatorConfig,
+    TicketsConfig,
     build_telemetry,
     default_config_path,
     load_config,
@@ -36,6 +37,7 @@ from .evidence import EvidencePack, labels_from_key
 from .investigator import CATEGORIES, SCOPES, Diagnosis, InvestigationError, OllamaInvestigator
 from .models import Event
 from .notify import ConsoleNotifier, DesktopNotifier, Notifier, NtfyNotifier, dispatch
+from .proposal import Proposal, draft, new_token
 from .sources.base import parse_duration
 from .state import Store
 from .tracker import CheckResult, process
@@ -139,6 +141,20 @@ def _parser() -> argparse.ArgumentParser:
     cmd = commands.add_parser("notify-test", help="send a test notification to every channel")
     cmd.set_defaults(handler=_notify_test)
 
+    cmd = commands.add_parser("propose", help="draft a ticket proposal for the PM and send it")
+    cmd.add_argument("incident", type=int, help="incident id")
+    cmd.add_argument("--no-send", action="store_true", help="print it instead of posting to Teams")
+    cmd.set_defaults(handler=_propose)
+
+    cmd = commands.add_parser("decide", help="approve or reject a ticket proposal")
+    cmd.add_argument("incident", type=int, help="incident id")
+    cmd.add_argument("decision", choices=sorted(server.DECISIONS))
+    cmd.set_defaults(handler=_decide)
+
+    cmd = commands.add_parser("serve", help="the local page behind the Teams card buttons")
+    cmd.add_argument("--port", type=int, help="default: tickets.port from the config")
+    cmd.set_defaults(handler=_serve)
+
     cmd = commands.add_parser("install", help="run checks periodically with launchd (macOS)")
     cmd.set_defaults(handler=_install)
 
@@ -174,6 +190,8 @@ def _check(args: argparse.Namespace) -> int:
     dispatch(_push_notifiers(config), events, config.notify.max_per_run)
     if config.investigator is not None:
         _investigate_new(config, store, events, now)
+    if config.tickets is not None:
+        _propose_due(config, store, now)
     open_count = len(store.open_incidents())
     print(
         f"{now.astimezone():%Y-%m-%d %H:%M:%S} check: {len(result.findings)} findings, "
@@ -231,6 +249,69 @@ def _diagnosed(incident: sqlite3.Row, diagnosis: Diagnosis) -> Event:
         url=incident["url"],
         incident_id=incident["id"],
     )
+
+
+def _propose_due(config: Config, store: Store, now: datetime) -> None:
+    """Propose a ticket for incidents that last or keep coming back, once per problem."""
+    settings = _tickets(config)
+    for incident in store.open_incidents():
+        if incident["proposal"]:
+            continue
+        history = store.same_problem(
+            incident["fingerprint"], now - timedelta(days=settings.recurring_days)
+        )
+        if any(row["proposal"] for row in history):
+            continue
+        lasted = now - datetime.fromisoformat(incident["opened_at"])
+        if lasted < timedelta(minutes=settings.after_minutes) and len(history) < settings.recurring:
+            continue
+        if store.proposals_since(now - timedelta(hours=1)) >= settings.max_per_hour:
+            print("ticket proposals skipped: hourly budget used up", file=sys.stderr)
+            return
+        try:
+            _make_proposal(config, store, incident, now, send=True)
+        except Exception as error:  # a failed proposal must not break monitoring
+            print(f"proposal for #{incident['id']} failed: {error}", file=sys.stderr)
+
+
+def _make_proposal(
+    config: Config, store: Store, incident: sqlite3.Row, now: datetime, send: bool
+) -> Proposal:
+    settings = _tickets(config)
+    history = store.same_problem(
+        incident["fingerprint"], now - timedelta(days=settings.recurring_days)
+    )
+    proposal = draft(triage.investigator(config), incident, history, now)
+    token = new_token()
+    store.save_proposal(incident["id"], proposal.to_json(), token, now)
+    event = Event(
+        "proposed",
+        "info",
+        f"🎫 {incident['rule']} #{incident['id']}: {proposal.recommendation}",
+        proposal.title,
+        group=incident["fingerprint"],
+        incident_id=incident["id"],
+    )
+    store.record([event], now)
+    ConsoleNotifier().send(event)
+    if send and settings.teams_url:
+        fresh = store.incident(incident["id"]) or incident
+        card = teams.proposal_card(
+            fresh,
+            proposal,
+            len(history),
+            settings.recurring_days,
+            server.links(f"http://127.0.0.1:{settings.port}", incident["id"], token),
+            triage.investigator_config(config).language,
+        )
+        teams.post(settings.teams_url, card)
+    return proposal
+
+
+def _tickets(config: Config) -> TicketsConfig:
+    if config.tickets is None:
+        raise ConfigError("No `tickets` section in the config")
+    return config.tickets
 
 
 def _incident_pack(config: Config, incident: sqlite3.Row) -> EvidencePack:
@@ -416,6 +497,8 @@ def _history(args: argparse.Namespace) -> int:
     for row in rows:
         review = json.loads(row["review"])["verdict"] if row["review"] else "not reviewed"
         notes = ["diagnosed" if row["diagnosis"] else "no diagnosis", review]
+        if row["proposal"]:
+            notes.append(f"ticket {row['decision'] or 'proposed'}")
         print(
             f"  #{row['id']:<4} {_local(row['opened_at'])}  {_lasted(row):>9}  "
             f"{row['rule']:<18} {row['summary']}  ({', '.join(notes)})"
@@ -444,6 +527,8 @@ def _show(args: argparse.Namespace) -> int:
         _print_diagnosis(Diagnosis(**json.loads(incident["diagnosis"])))
     if incident["review"]:
         _print_review(json.loads(incident["review"]))
+    if incident["proposal"]:
+        _print_proposal(Proposal.from_json(incident["proposal"]), incident["decision"])
     if not incident["evidence"]:
         print("\nno evidence stored")
         return 0
@@ -533,6 +618,52 @@ def _export_case(args: argparse.Namespace) -> int:
     return 0
 
 
+def _propose(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    store = Store(config.state_path)
+    incident = store.incident(args.incident)
+    if incident is None:
+        print(f"no incident {args.incident}", file=sys.stderr)
+        return 1
+    try:
+        proposal = _make_proposal(config, store, incident, datetime.now(UTC), not args.no_send)
+    except InvestigationError as error:
+        print(f"proposal failed: {error}", file=sys.stderr)
+        return 1
+    _print_proposal(proposal, None)
+    return 0
+
+
+def _decide(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    store = Store(config.state_path)
+    incident = store.incident(args.incident)
+    if incident is None or not incident["proposal"]:
+        print(f"no ticket proposal for incident {args.incident}", file=sys.stderr)
+        return 1
+    server.decide(store, incident, args.decision, datetime.now(UTC))
+    print(f"#{args.incident}: {server.DECISIONS[args.decision]}")
+    return 0
+
+
+def _serve(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    settings = _tickets(config)
+    port = args.port or settings.port
+    language = triage.investigator_config(config).language
+    print(f"decision page on http://127.0.0.1:{port}", flush=True)
+    server.serve(config.state_path, language, port)
+    return 0
+
+
+def _print_proposal(proposal: Proposal, decision: str | None) -> None:
+    ticket = f" {proposal.existing_ticket}" if proposal.existing_ticket else ""
+    print(f"\n🎫 {proposal.recommendation}{ticket} ({proposal.priority}): {proposal.title}")
+    print(f"     why: {proposal.reason}")
+    print(f"decision: {decision or 'pending'}")
+    print("\n" + proposal.description)
+
+
 def _print_review(review: dict[str, Any]) -> None:
     print(f"\nreview: {review['verdict']}")
     print(f"   cause: {review['cause']}")
@@ -611,12 +742,16 @@ def _install(args: argparse.Namespace) -> int:
     config = load_config(config_path)
     target = launchd.install(PROJECT_DIR, config_path, config.interval_minutes)
     print(f"installed {target}; checks every {config.interval_minutes} min")
+    if config.tickets is not None:
+        page = launchd.install(PROJECT_DIR, config_path, config.interval_minutes, command="serve")
+        print(f"installed {page}; decision page on http://127.0.0.1:{config.tickets.port}")
     print(f"log: {launchd.log_path()}")
     return 0
 
 
 def _uninstall(args: argparse.Namespace) -> int:
     removed = launchd.uninstall()
+    launchd.uninstall(label=launchd.SERVER_LABEL)
     print("removed" if removed else "no agent was installed")
     return 0
 

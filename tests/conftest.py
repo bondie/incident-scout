@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import pytest
 
@@ -73,6 +74,19 @@ def _answer(value: T | Exception) -> T:
 
 def series(value: float, **labels: str) -> Series:
     return Series(dict(labels), [(T0.timestamp(), value)])
+
+
+@pytest.fixture(autouse=True)
+def no_launchctl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test must never load or unload the real LaunchAgents of the machine it runs on."""
+    real = subprocess.run
+
+    def guarded(args: Any, *rest: Any, **options: Any) -> Any:
+        if args and str(args[0]).endswith("launchctl"):
+            raise AssertionError(f"tests must not run launchctl: {args}")
+        return real(args, *rest, **options)
+
+    monkeypatch.setattr(subprocess, "run", guarded)
 
 
 @pytest.fixture

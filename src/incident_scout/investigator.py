@@ -104,18 +104,24 @@ class OllamaInvestigator:
     transport: httpx.BaseTransport | None = None
 
     def diagnose(self, pack: EvidencePack) -> Diagnosis:
+        system = SYSTEM_PROMPT.format(language=self.language)
+        content, seconds = self.complete(system, pack.render(), SCHEMA)
+        return parse_diagnosis(content, self.model, seconds)
+
+    def complete(self, system: str, user: str, schema: dict[str, Any]) -> tuple[str, float]:
+        """One chat turn constrained to a JSON schema; returns the content and the seconds."""
         payload: dict[str, Any] = {
             "model": self.model,
             "stream": False,
-            "format": SCHEMA,
+            "format": schema,
             "options": {
                 "temperature": 0,
                 "num_ctx": self.num_ctx,
                 "num_predict": self.max_tokens,
             },
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT.format(language=self.language)},
-                {"role": "user", "content": pack.render()},
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
             ],
         }
         if self.think is not None:
@@ -126,13 +132,13 @@ class OllamaInvestigator:
                 response = client.post(f"{self.url.rstrip('/')}/api/chat", json=payload)
                 if response.status_code == httpx.codes.NOT_IMPLEMENTED:
                     response = client.post(
-                        f"{self.url.rstrip('/')}/api/chat", json=_without_schema(payload)
+                        f"{self.url.rstrip('/')}/api/chat", json=_without_schema(payload, schema)
                     )
                 response.raise_for_status()
         except httpx.HTTPError as error:
             raise InvestigationError(f"{self.model}: {error}") from error
         content = response.json().get("message", {}).get("content", "")
-        return parse_diagnosis(content, self.model, time.perf_counter() - started)
+        return content, time.perf_counter() - started
 
     def warm_up(self) -> None:
         """Load the model so that the first timed diagnosis does not pay for it."""
@@ -149,10 +155,10 @@ class OllamaInvestigator:
             response.raise_for_status()
 
 
-def _without_schema(payload: dict[str, Any]) -> dict[str, Any]:
+def _without_schema(payload: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
     """Some model runtimes reject constrained output; describe the schema in the prompt instead."""
     fields = []
-    for key, spec in SCHEMA["properties"].items():
+    for key, spec in schema["properties"].items():
         kind = "one of: " + " | ".join(spec["enum"]) if "enum" in spec else spec["type"]
         fields.append(f'"{key}": {kind}')
     shape = "; ".join(fields)
@@ -164,6 +170,21 @@ def _without_schema(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def parse_diagnosis(content: str, model: str = "", seconds: float = 0.0) -> Diagnosis:
+    data = json_object(content, model, SCHEMA["required"])
+    return Diagnosis(
+        summary=str(data["summary"]),
+        scope=choice(data["scope"], SCOPES),
+        category=choice(data["category"], CATEGORIES),
+        likely_cause=str(data["likely_cause"]),
+        confidence=choice(data["confidence"], CONFIDENCE),
+        key_evidence=[str(item) for item in data.get("key_evidence") or []][:4],
+        next_steps=[str(item) for item in data.get("next_steps") or []][:3],
+        model=model,
+        seconds=round(seconds, 1),
+    )
+
+
+def json_object(content: str, model: str, required: list[str]) -> dict[str, Any]:
     start, end = content.find("{"), content.rfind("}")
     if start > 0 and end > start:  # tolerate prose or a ```json fence around the object
         content = content[start : end + 1]
@@ -173,23 +194,13 @@ def parse_diagnosis(content: str, model: str = "", seconds: float = 0.0) -> Diag
         raise InvestigationError(f"{model} returned invalid JSON: {content[:200]!r}") from error
     if not isinstance(data, dict):
         raise InvestigationError(f"{model} returned {type(data).__name__}, expected an object")
-    missing = [key for key in SCHEMA["required"] if key not in data]
+    missing = [key for key in required if key not in data]
     if missing:
         raise InvestigationError(f"{model} left out {', '.join(missing)}")
-    return Diagnosis(
-        summary=str(data["summary"]),
-        scope=_choice(data["scope"], SCOPES),
-        category=_choice(data["category"], CATEGORIES),
-        likely_cause=str(data["likely_cause"]),
-        confidence=_choice(data["confidence"], CONFIDENCE),
-        key_evidence=[str(item) for item in data.get("key_evidence") or []][:4],
-        next_steps=[str(item) for item in data.get("next_steps") or []][:3],
-        model=model,
-        seconds=round(seconds, 1),
-    )
+    return data
 
 
-def _choice(value: Any, allowed: tuple[str, ...]) -> str:
+def choice(value: Any, allowed: tuple[str, ...]) -> str:
     if isinstance(value, list) and len(value) == 1:
         value = value[0]
     text = str(value).strip().lower()
