@@ -81,3 +81,30 @@ rules:
     kind: promql
     query: 'max by (instance) ((time() - backup_last_success_timestamp_seconds{$prod}) / 3600) > 26'
     summary: '{instance}: last backup {value:.0f} h ago'
+
+# Optional: diagnose every new incident with a local model (Ollama) and follow up on its
+# notification. Evidence queries see the incident's labels as $label and the evidence
+# window as $window. `promql` and `logql` give a timeline, `logql_top` one total per series.
+# investigator:
+#   model: gemma4:26b                # pick yours with `scout eval eval/cases --models ...`
+#   url: http://localhost:11434
+#   language: English
+#   before_minutes: 30
+#   after_minutes: 10
+#   max_per_hour: 4
+#   # Similar past tickets from https://github.com/bondie/ticket-precedent
+#   precedents_command: [uv, --directory, ~/ticket-precedent, run, tp, search, --json, --limit, '3']
+#   precedents_from: Top errors in the window
+#   evidence:
+#     - name: HTTP 5xx per 5 min
+#       kind: logql
+#       query: 'sum(count_over_time({job="nginx", app="$app"} | json | status >= 500 [5m]))'
+#     - name: Top errors in the window
+#       kind: logql_top
+#       query: 'topk(6, sum by (message) (count_over_time({job="app", app="$app"} | json | level="error" [$window])))'
+#     - name: Probe success, all sites
+#       kind: promql
+#       query: 'min by (instance) (probe_success)'
+#     - name: CPU load
+#       kind: promql
+#       query: 'max(node_load1{app="$app"})'

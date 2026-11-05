@@ -57,6 +57,11 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA busy_timeout = 10000")
         self.db.executescript(SCHEMA)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(incidents)")}
+        if "diagnosis" not in columns:
+            with self.db:
+                self.db.execute("ALTER TABLE incidents ADD COLUMN diagnosis TEXT")
+                self.db.execute("ALTER TABLE incidents ADD COLUMN diagnosed_at TEXT")
 
     def close(self) -> None:
         self.db.close()
@@ -78,6 +83,25 @@ class Store:
             "ORDER BY resolved_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
+
+    def incident(self, incident_id: int) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self.db.execute(
+            "SELECT * FROM incidents WHERE id = ?", (incident_id,)
+        ).fetchone()
+        return row
+
+    def save_diagnosis(self, incident_id: int, diagnosis: str, now: datetime) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE incidents SET diagnosis = ?, diagnosed_at = ? WHERE id = ?",
+                (diagnosis, iso(now), incident_id),
+            )
+
+    def diagnoses_since(self, moment: datetime) -> int:
+        row = self.db.execute(
+            "SELECT COUNT(*) FROM incidents WHERE diagnosed_at >= ?", (iso(moment),)
+        ).fetchone()
+        return int(row[0])
 
     def open(self, finding: Finding, now: datetime, first_seen: str | None = None) -> None:
         with self.db:

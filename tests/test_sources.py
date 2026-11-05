@@ -177,3 +177,11 @@ def test_http_telemetry_errors_become_source_errors():
                 await telemetry.alerts()
 
     asyncio.run(scenario())
+
+
+def test_mcp_telemetry_passes_on_server_error_text():
+    session = FakeSession(
+        {"loki_query": ToolResult([Text("HTTP 400: pipeline error: 'JSONParserErr'")])}
+    )
+    with pytest.raises(SourceError, match="pipeline error"):
+        asyncio.run(McpTelemetry("https://mcp.example", session=session).logs("x", "1m"))

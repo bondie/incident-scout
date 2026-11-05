@@ -107,6 +107,8 @@ class McpTelemetry:
         text = "".join(str(getattr(part, "text", "")) for part in result.content)
         if result.is_error:
             raise SourceError(f"{tool} failed: {text[:300]}")
+        if not text.lstrip().startswith(("{", "[")):
+            raise SourceError(f"{tool}: {text[:300]}")
         try:
             return json.loads(text)
         except ValueError as error:
