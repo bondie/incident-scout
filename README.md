@@ -122,11 +122,64 @@ server's automatic step stays below the rule's window and short spikes are not s
 The same replay is the basis of the evaluation on the roadmap: known incidents with known
 start times, scored for detection latency and false alarms.
 
+## Investigator
+
+The alert says *what* is wrong. A few seconds later a second notification says *why*, written
+by a local model through [Ollama](https://ollama.com), so logs never leave the machine:
+
+```text
+🔴 http-5xx       prod-shop-a: 1530x HTTP 5xx in 5 min
+🔎 http-5xx       Every product and cart request calls PriceResolver::resolveForChannel(),
+                  which no longer exists; the last release probably removed it [high]
+```
+
+1. **Evidence pack.** Deterministic queries from the config run over a window around the
+   start (30 minutes before, 10 after): 5xx and request timelines, the most frequent error
+   messages, paths, user agents and clients, probe results of the whole fleet, services that
+   are down, CPU, memory and disk. Similar past tickets come from
+   [ticket-precedent](https://github.com/bondie/ticket-precedent), searched with the top
+   error message.
+2. **One model call.** The model gets the pack and must answer in a JSON schema: summary,
+   scope (one shop or several), category, likely cause, confidence, key evidence and next
+   steps. There are no tool calls and no agent loop, because small local models handle those
+   poorly. A fixed pack makes every diagnosis reproducible and testable.
+3. **Follow-up.** The diagnosis replaces the alert in Notification Center and is stored with
+   the incident. `max_per_hour` caps the model's work during an incident storm.
+
+```bash
+uv run scout investigate --incident 12                  # diagnose an incident again
+uv run scout investigate --rule http-5xx --label shop=b --at 2026-03-12T14:05 --show-pack
+uv run scout investigate --pack pack.json --model gemma4:12b
+```
+
+### Choosing a model
+
+`scout eval` replays frozen evidence packs with known causes against any number of models.
+`eval/cases/` holds twelve synthetic incidents: a database or Redis outage, a full disk,
+memory exhaustion, a bad deploy, a payment gateway timeout, a fleet-wide network problem,
+bot traffic, a search engine outage, harmless noise, an expiring certificate, and one case
+without enough evidence.
+
+```bash
+uv run scout eval eval/cases --models gemma4:12b,gpt-oss:20b --out results.json
+uv run scout report results.json --cases eval/cases      # combine runs, per-case matrix
+```
+
+Each diagnosis is scored on four checks, and the score is their mean:
+
+- **Category** and **Scope** are compared with the expected values.
+- **Cause** passes when the stated cause contains the expected key terms. Czech and English
+  wording both count, and accents are ignored.
+- **Grounded** fails when the answer names a class, method, error code or host that is not
+  in the evidence pack, which catches invented details.
+
+<!-- MODEL-RESULTS -->
+
 ## Development
 
 ```bash
 uv sync
-uv run pytest --cov          # no network needed: telemetry, MCP and notifiers are faked
+uv run pytest --cov          # no network needed: telemetry, MCP, Ollama and notifiers are faked
 uv run ruff check . && uv run ruff format --check .
 uv run mypy                  # strict mode
 uvx pre-commit install       # ruff, mypy and gitleaks on every commit
@@ -134,14 +187,10 @@ uvx pre-commit install       # ruff, mypy and gitleaks on every commit
 
 ## Roadmap
 
-- **Investigator on a local LLM.** For a new incident, deterministic code collects an
-  evidence pack: metrics around the start, the most frequent error lines, recent deploys,
-  and similar past tickets from [ticket-precedent](https://github.com/bondie/ticket-precedent).
-  A local model (Ollama) then writes a short hypothesis into the notification. Logs never
-  leave the machine.
-- **Evaluation.** A docker-compose demo stack with fault injection (database killed, 5xx
-  burst, full disk, expiring certificate). It would measure detection and false alarms, and
-  compare a local model's diagnoses with Claude's on the same evidence.
+- **Fault-injection demo stack.** docker-compose with a shop, a database, Prometheus and
+  Loki, where faults are injected on purpose (database killed, 5xx burst, full disk,
+  expiring certificate). It would measure detection latency and false alarms end to end.
+- Comparing local models with a hosted model (Claude) on the same evidence packs.
 - Reminders for long-open critical incidents, a systemd timer for Linux.
 
 ## License

@@ -1,0 +1,88 @@
+id: not-enough-evidence
+note: One shop's probe fails but there are no logs and every other signal is normal.
+expect:
+  category:
+  - unknown
+  - infrastructure
+  scope: single_shop
+  cause:
+  - - nedostat
+    - nejasn
+    - unknown
+    - nelze
+    - insufficient
+    - not enough
+    - chybi
+    - neni jasn
+    - nezna
+    - neurc
+    - bez dat
+    - zadne
+    - no data
+    - chybej
+pack:
+  rule: shop-unreachable
+  severity: critical
+  summary: 'prod-shop-c: only 40% of probes succeeded in 15 min'
+  labels:
+    shop: prod-shop-c
+  started_at: '2026-03-12T14:05:00+01:00'
+  sections:
+  - name: HTTP 5xx per 5 min
+    lines:
+    - time   13:35  13:40  13:45  13:50  13:55  14:00  14:05  14:10  14:15
+    - value      .      .      .      .      .      .      .      .      .
+  - name: Requests per 5 min
+    lines: []
+  - name: Top errors in the window
+    lines: []
+  - name: Warnings by channel in the window
+    lines: []
+  - name: Paths answering 5xx in the window
+    lines: []
+  - name: Top user agents in the window
+    lines:
+    - '  2210x  user_agent=node'
+    - '   412x  user_agent=Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1'
+    - '   380x  user_agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+    - '    96x  user_agent=Blackbox Exporter/0.25.0'
+  - name: Top client addresses in the window
+    lines:
+    - '  2210x  src=10.0.0.10'
+    - '    96x  src=10.0.9.2'
+    - '    41x  src=203.0.113.18'
+    - '    37x  src=198.51.100.7'
+  - name: HTTP 5xx in the window, all prod shops
+    lines: []
+  - name: HTTP probe success, all prod shops
+    lines:
+    - time              13:35  13:40  13:45  13:50  13:55  14:00  14:05  14:10  14:15
+    - shop=prod-shop-a      1      1      1      1      1      1      1      1      1
+    - shop=prod-shop-b      1      1      1      1      1      1      1      1      1
+    - shop=prod-shop-c      1      1      1      1      1      0      0      0      1
+    - shop=prod-shop-d      1      1      1      1      1      1      1      1      1
+  - name: Services and exporters up
+    lines:
+    - time               13:35  13:40  13:45  13:50  13:55  14:00  14:05  14:10  14:15
+    - job=blackbox           1      1      1      1      1      1      1      1      1
+    - job=elasticsearch      1      1      1      1      1      1      1      1      1
+    - job=mysql              1      1      1      1      1      1      1      1      1
+    - job=node               1      1      1      1      1      1      1      1      1
+    - job=rabbitmq           1      1      1      1      1      1      1      1      1
+    - job=redis              1      1      1      1      1      1      1      1      1
+  - name: MySQL connected threads
+    lines:
+    - time   13:35  13:40  13:45  13:50  13:55  14:00  14:05  14:10  14:15
+    - value      4      4      4      4      4      4      4      4      4
+  - name: CPU load (1 min)
+    lines:
+    - time   13:35  13:40  13:45  13:50  13:55  14:00  14:05  14:10  14:15
+    - value   0.31   0.28   0.35    0.3   0.27   0.33   0.36    0.3   0.29
+  - name: Memory and disk used (ratio)
+    lines:
+    - time         13:35  13:40  13:45  13:50  13:55  14:00  14:05  14:10  14:15
+    - what=memory   0.62   0.62   0.62   0.62   0.62   0.62   0.62   0.62   0.62
+    - what=disk     0.41   0.41   0.41   0.41   0.41   0.41   0.41   0.41   0.41
+  - name: Similar past tickets
+    lines:
+    - (no similar tickets)

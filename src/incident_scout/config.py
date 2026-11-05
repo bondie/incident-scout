@@ -13,6 +13,7 @@ from typing import Any, cast, get_args
 
 import yaml
 
+from .evidence import EvidenceKind, EvidenceQuery
 from .models import SEVERITIES
 from .rules import Rule, RuleKind
 from .sources.http import HttpTelemetry
@@ -32,6 +33,21 @@ class NotifyConfig:
     ntfy_topic: str | None = None
     ntfy_token: str | None = None
     max_per_run: int = 5
+
+
+@dataclass(frozen=True)
+class InvestigatorConfig:
+    model: str
+    url: str = "http://localhost:11434"
+    language: str = "English"
+    think: bool | str | None = None
+    before_minutes: int = 30
+    after_minutes: int = 10
+    max_per_hour: int = 4
+    timeout_seconds: int = 300
+    precedents_command: tuple[str, ...] = ()
+    precedents_from: str | None = None
+    evidence: tuple[EvidenceQuery, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -66,6 +82,7 @@ class Config:
     resolve_after: int = 2
     timeout_seconds: int = 120
     quiet_hours: QuietHours | None = None
+    investigator: InvestigatorConfig | None = None
 
     def rule(self, name: str) -> Rule:
         for rule in self.rules:
@@ -111,7 +128,28 @@ def load_config(path: Path | None = None) -> Config:
         options["state_path"] = Path(raw["state_path"]).expanduser()
     if raw.get("quiet_hours"):
         options["quiet_hours"] = _quiet_hours(raw["quiet_hours"])
+    if raw.get("investigator"):
+        options["investigator"] = _investigator(raw["investigator"], variables)
     return Config(source=raw.get("source") or {}, rules=rules, notify=notify, **options)
+
+
+def _investigator(value: Mapping[str, Any], variables: Mapping[str, str]) -> InvestigatorConfig:
+    data = dict(value)
+    if not data.get("model"):
+        raise ConfigError("investigator.model is required, e.g. qwen3.8:27b")
+    queries = []
+    for item in data.pop("evidence", None) or []:
+        query = dict(item)
+        if query.get("kind") not in get_args(EvidenceKind):
+            raise ConfigError(f"investigator.evidence kind must be one of {get_args(EvidenceKind)}")
+        query["query"] = Template(str(query.get("query", ""))).safe_substitute(variables)
+        queries.append(cast(EvidenceQuery, _build(EvidenceQuery, query, "investigator.evidence")))
+    data["evidence"] = tuple(queries)
+    command = data.get("precedents_command") or ()
+    data["precedents_command"] = tuple(
+        str(Path(part).expanduser()) if part.startswith("~") else str(part) for part in command
+    )
+    return cast(InvestigatorConfig, _build(InvestigatorConfig, data, "investigator"))
 
 
 def _quiet_hours(value: Mapping[str, Any]) -> QuietHours:
