@@ -213,7 +213,12 @@ What the numbers say:
 - **Caveats.** Twenty cases with one run each means a difference of 0.05 is a single case.
   The synthetic cases were written by the same author as the scoring rules.
 
-<!-- THINKING-RESULT -->
+**Thinking does not pay off here.** The winner with thinking switched on scored 0.86
+instead of 0.97, and its median latency rose from 39 s to 99 s. Two answers exceeded the
+five-minute timeout, and on three cases the cause got vaguer. Thinking fixed one case, the
+scope of the fleet-wide network problem. For a pack that already holds the decisive
+evidence, careful reading beats long deliberation, so the recommended setting is
+`think: false`.
 
 ## Development
 
