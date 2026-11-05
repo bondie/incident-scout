@@ -10,6 +10,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 from . import launchd, triage
 from .config import (
@@ -21,9 +24,16 @@ from .config import (
     load_config,
 )
 from .engine import backtest, run_check
-from .evaluation import case_matrix, evaluate, load_cases, markdown_table, rescore
+from .evaluation import (
+    case_document,
+    case_matrix,
+    evaluate,
+    load_cases,
+    markdown_table,
+    rescore,
+)
 from .evidence import EvidencePack, labels_from_key
-from .investigator import Diagnosis, InvestigationError, OllamaInvestigator
+from .investigator import CATEGORIES, SCOPES, Diagnosis, InvestigationError, OllamaInvestigator
 from .models import Event
 from .notify import ConsoleNotifier, DesktopNotifier, Notifier, NtfyNotifier, dispatch
 from .sources.base import parse_duration
@@ -31,6 +41,7 @@ from .state import Store
 from .tracker import CheckResult, process
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
+VERDICTS = ("correct", "partial", "wrong")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,6 +69,36 @@ def _parser() -> argparse.ArgumentParser:
     cmd = commands.add_parser("status", help="open incidents, pending findings and health")
     cmd.set_defaults(handler=_status)
 
+    cmd = commands.add_parser("history", help="incidents of the last days")
+    cmd.add_argument("--since", default="7d", help="how far back, e.g. 24h, 30d")
+    cmd.add_argument("--rule", help="only this rule")
+    cmd.set_defaults(handler=_history)
+
+    cmd = commands.add_parser("show", help="one incident: timeline, diagnosis, review, evidence")
+    cmd.add_argument("incident", type=int, help="incident id")
+    cmd.add_argument("--pack", action="store_true", help="print the stored evidence pack")
+    cmd.set_defaults(handler=_show)
+
+    cmd = commands.add_parser("review", help="record whether the diagnosis was right")
+    cmd.add_argument("incident", type=int, help="incident id")
+    cmd.add_argument("--verdict", required=True, choices=VERDICTS)
+    cmd.add_argument("--cause", help="the real cause (default: the diagnosis, if correct)")
+    cmd.add_argument("--category", choices=CATEGORIES, help="real category (default: diagnosis)")
+    cmd.add_argument("--scope", choices=SCOPES, help="real scope (default: diagnosis)")
+    cmd.add_argument(
+        "--keywords",
+        action="append",
+        default=[],
+        help="comma-separated synonyms one of which a right cause must name (repeatable)",
+    )
+    cmd.add_argument("--note", default="", help="anything worth keeping")
+    cmd.set_defaults(handler=_review)
+
+    cmd = commands.add_parser("export-case", help="turn a reviewed incident into an eval case")
+    cmd.add_argument("incident", type=int, help="incident id")
+    cmd.add_argument("--out", type=Path, required=True, help="case file or directory")
+    cmd.set_defaults(handler=_export_case)
+
     cmd = commands.add_parser("backtest", help="replay rules over history to tune thresholds")
     cmd.add_argument("--rule", action="append", help="only this rule (repeatable)")
     cmd.add_argument("--since", default="3d", help="how far back, e.g. 24h, 7d")
@@ -76,6 +117,9 @@ def _parser() -> argparse.ArgumentParser:
     cmd.add_argument("--save-pack", type=Path, help="write the evidence pack as JSON")
     cmd.add_argument("--show-pack", action="store_true", help="print the evidence pack")
     cmd.add_argument("--no-diagnosis", action="store_true", help="only collect evidence")
+    cmd.add_argument(
+        "--recollect", action="store_true", help="query telemetry again instead of the stored pack"
+    )
     cmd.add_argument("--model", help="Ollama model instead of the configured one")
     cmd.set_defaults(handler=_investigate)
 
@@ -124,6 +168,7 @@ def _check(args: argparse.Namespace) -> int:
     result = _run(config)
     rules = {rule.name: rule for rule in config.rules}
     events = process(store, result, rules, now, config.blind_after, config.resolve_after)
+    store.record(events, now)
     for event in events:
         ConsoleNotifier().send(event)
     dispatch(_push_notifiers(config), events, config.notify.max_per_run)
@@ -150,22 +195,42 @@ def _investigate_new(config: Config, store: Store, events: Sequence[Event], now:
         if store.diagnoses_since(now - timedelta(hours=1)) >= settings.max_per_hour:
             print("investigation skipped: hourly budget used up", file=sys.stderr)
             return
-        try:
-            diagnosis = triage.investigator(config).diagnose(_incident_pack(config, incident))
-        except Exception as error:  # a failed diagnosis must not break monitoring
-            print(f"investigation of {event.group} failed: {error}", file=sys.stderr)
-            continue
-        store.save_diagnosis(incident["id"], diagnosis.to_json(), now)
-        follow_up = Event(
-            "diagnosed",
-            incident["severity"],
-            f"🔎 {incident['rule']}",
-            f"{diagnosis.likely_cause} [{diagnosis.confidence}]",
-            group=incident["fingerprint"],
-            url=incident["url"],
-        )
+        follow_up = _diagnose(config, store, incident, now)
+        store.record([follow_up], now)
         ConsoleNotifier().send(follow_up)
-        dispatch(_push_notifiers(config), [follow_up])
+        if follow_up.kind == "diagnosed":
+            dispatch(_push_notifiers(config), [follow_up])
+
+
+def _diagnose(config: Config, store: Store, incident: sqlite3.Row, now: datetime) -> Event:
+    """Keep the evidence even when the model fails, so the incident can be judged later."""
+    try:
+        pack = _incident_pack(config, incident)
+        store.save_evidence(incident["id"], pack.to_json())
+        diagnosis = triage.investigator(config).diagnose(pack)
+    except Exception as error:  # a failed diagnosis must not break monitoring
+        return Event(
+            "diagnosis_failed",
+            "info",
+            f"investigation of #{incident['id']} failed",
+            str(error)[:300],
+            group=incident["fingerprint"],
+            incident_id=incident["id"],
+        )
+    store.save_diagnosis(incident["id"], diagnosis.to_json(), now)
+    return _diagnosed(incident, diagnosis)
+
+
+def _diagnosed(incident: sqlite3.Row, diagnosis: Diagnosis) -> Event:
+    return Event(
+        "diagnosed",
+        incident["severity"],
+        f"🔎 {incident['rule']} #{incident['id']}",
+        f"{diagnosis.likely_cause} [{diagnosis.confidence}]",
+        group=incident["fingerprint"],
+        url=incident["url"],
+        incident_id=incident["id"],
+    )
 
 
 def _incident_pack(config: Config, incident: sqlite3.Row) -> EvidencePack:
@@ -191,6 +256,8 @@ def _investigate(args: argparse.Namespace) -> int:
         return 1
     if args.pack:
         pack = EvidencePack.from_json(args.pack.read_text())
+    elif incident is not None and incident["evidence"] and not args.recollect:
+        pack = EvidencePack.from_json(incident["evidence"])
     elif incident is not None:
         pack = _incident_pack(config, incident)
     else:
@@ -214,7 +281,10 @@ def _investigate(args: argparse.Namespace) -> int:
         return 1
     _print_diagnosis(diagnosis)
     if incident is not None:
-        store.save_diagnosis(incident["id"], diagnosis.to_json(), datetime.now(UTC))
+        now = datetime.now(UTC)
+        store.save_evidence(incident["id"], pack.to_json())
+        store.save_diagnosis(incident["id"], diagnosis.to_json(), now)
+        store.record([_diagnosed(incident, diagnosis)], now)
     return 0
 
 
@@ -312,7 +382,10 @@ def _status(args: argparse.Namespace) -> int:
     incidents = store.open_incidents()
     print(f"\nopen incidents: {len(incidents)}")
     for row in incidents:
-        print(f"  {row['severity']:<8} since {_local(row['opened_at'])}  {row['summary']}")
+        print(
+            f"  #{row['id']:<4} {row['severity']:<8} since {_local(row['opened_at'])}  "
+            f"{row['summary']}"
+        )
     pending = store.pending()
     if pending:
         print(f"\nwaiting for confirmation: {len(pending)}")
@@ -327,8 +400,161 @@ def _status(args: argparse.Namespace) -> int:
     if recent:
         print("\nrecently resolved:")
         for row in recent:
-            print(f"  {_local(row['opened_at'])} - {_local(row['resolved_at'])}  {row['summary']}")
+            print(
+                f"  #{row['id']:<4} {_local(row['opened_at'])} - {_local(row['resolved_at'])}  "
+                f"{row['summary']}"
+            )
     return 0
+
+
+def _history(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    store = Store(config.state_path)
+    since = datetime.now(UTC) - timedelta(seconds=parse_duration(args.since))
+    rows = store.incidents_since(since, args.rule)
+    print(f"{len(rows)} incidents since {since.astimezone():%d.%m. %H:%M}")
+    for row in rows:
+        review = json.loads(row["review"])["verdict"] if row["review"] else "not reviewed"
+        notes = ["diagnosed" if row["diagnosis"] else "no diagnosis", review]
+        print(
+            f"  #{row['id']:<4} {_local(row['opened_at'])}  {_lasted(row):>9}  "
+            f"{row['rule']:<18} {row['summary']}  ({', '.join(notes)})"
+        )
+    return 0
+
+
+def _show(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    store = Store(config.state_path)
+    incident = store.incident(args.incident)
+    if incident is None:
+        print(f"no incident {args.incident}", file=sys.stderr)
+        return 1
+    print(f"#{incident['id']} {incident['rule']} ({incident['severity']})  {incident['summary']}")
+    closed = "still open"
+    if incident["resolved_at"]:
+        closed = f"resolved {_local(incident['resolved_at'])} ({_lasted(incident)})"
+    print(f"opened {_local(incident['opened_at'])}, {closed}")
+    if incident["url"]:
+        print(f"link: {incident['url']}")
+    print("\ntimeline:")
+    for event in store.timeline(incident):
+        print(f"  {_local(event['at'])}  {event['kind']:<16} {event['title']} {event['message']}")
+    if incident["diagnosis"]:
+        _print_diagnosis(Diagnosis(**json.loads(incident["diagnosis"])))
+    if incident["review"]:
+        _print_review(json.loads(incident["review"]))
+    if not incident["evidence"]:
+        print("\nno evidence stored")
+        return 0
+    if args.pack:
+        print("\n" + EvidencePack.from_json(incident["evidence"]).render())
+        return 0
+    print("\nevidence stored; --pack prints it")
+    return 0
+
+
+def _review(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    store = Store(config.state_path)
+    incident = store.incident(args.incident)
+    if incident is None:
+        print(f"no incident {args.incident}", file=sys.stderr)
+        return 1
+    diagnosis = Diagnosis(**json.loads(incident["diagnosis"])) if incident["diagnosis"] else None
+    cause = args.cause
+    if cause is None and args.verdict == "correct" and diagnosis is not None:
+        cause = diagnosis.likely_cause
+    if cause is None:
+        print("say what the real cause was with --cause", file=sys.stderr)
+        return 2
+    review = {
+        "verdict": args.verdict,
+        "cause": cause,
+        "category": args.category or (diagnosis.category if diagnosis else None),
+        "scope": args.scope or (diagnosis.scope if diagnosis else None),
+        "keywords": [group for group in map(_synonyms, args.keywords) if group],
+        "note": args.note,
+        "model": diagnosis.model if diagnosis else None,
+    }
+    now = datetime.now(UTC)
+    store.save_review(incident["id"], json.dumps(review, ensure_ascii=False), now)
+    store.record(
+        [
+            Event(
+                "reviewed",
+                "info",
+                f"review: {args.verdict}",
+                cause,
+                group=incident["fingerprint"],
+                incident_id=incident["id"],
+            )
+        ],
+        now,
+    )
+    _print_review(review)
+    return 0
+
+
+def _export_case(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    store = Store(config.state_path)
+    incident = store.incident(args.incident)
+    if incident is None:
+        print(f"no incident {args.incident}", file=sys.stderr)
+        return 1
+    review = json.loads(incident["review"]) if incident["review"] else {}
+    missing = [
+        hint
+        for hint, ok in (
+            ("stored evidence", incident["evidence"]),
+            ("a review (`scout review`)", review),
+            ("a category and scope in the review", review.get("category") and review.get("scope")),
+            ("--keywords in the review", review.get("keywords")),
+        )
+        if not ok
+    ]
+    if missing:
+        needs = ", ".join(missing)
+        print(f"#{incident['id']} cannot be a case yet, it needs {needs}", file=sys.stderr)
+        return 1
+    case_id = f"incident-{incident['id']}-{incident['rule']}"
+    document = case_document(
+        case_id,
+        EvidencePack.from_json(incident["evidence"]),
+        review["category"],
+        review["scope"],
+        review["keywords"],
+        note=" ".join(filter(None, [review["cause"], review.get("note")])),
+    )
+    target = args.out / f"{case_id}.yaml" if args.out.is_dir() else args.out
+    target.write_text(yaml.safe_dump(document, allow_unicode=True, sort_keys=False, width=1000))
+    print(f"wrote {target}")
+    return 0
+
+
+def _print_review(review: dict[str, Any]) -> None:
+    print(f"\nreview: {review['verdict']}")
+    print(f"   cause: {review['cause']}")
+    print(f"  expect: {review.get('category') or '?'}, {review.get('scope') or '?'}")
+    keywords = review.get("keywords") or []
+    if keywords:
+        groups = " AND ".join("(" + " | ".join(g) + ")" for g in keywords)
+        print(f"keywords: {groups}")
+    if review.get("note"):
+        print(f"    note: {review['note']}")
+
+
+def _synonyms(group: str) -> list[str]:
+    return [word.strip() for word in group.split(",") if word.strip()]
+
+
+def _lasted(incident: sqlite3.Row) -> str:
+    if not incident["resolved_at"]:
+        return "open"
+    opened = datetime.fromisoformat(incident["opened_at"])
+    minutes = round((datetime.fromisoformat(incident["resolved_at"]) - opened).total_seconds() / 60)
+    return f"{minutes} min" if minutes < 120 else f"{minutes / 60:.1f} h"
 
 
 def _backtest(args: argparse.Namespace) -> int:

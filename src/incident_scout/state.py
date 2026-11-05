@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .models import Finding
+from .models import Event, Finding
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS incidents (
@@ -43,7 +43,21 @@ CREATE TABLE IF NOT EXISTS health (
     last_error TEXT
 );
 INSERT OR IGNORE INTO health (id) VALUES (1);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    incident_id INTEGER REFERENCES incidents (id),
+    grp TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_by_incident ON events (incident_id);
+CREATE INDEX IF NOT EXISTS events_by_time ON events (at);
 """
+# Columns added after the first release; existing databases get them on open.
+INCIDENT_COLUMNS = ("diagnosis", "diagnosed_at", "evidence", "review", "reviewed_at")
 
 
 def iso(moment: datetime) -> str:
@@ -58,10 +72,10 @@ class Store:
         self.db.execute("PRAGMA busy_timeout = 10000")
         self.db.executescript(SCHEMA)
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(incidents)")}
-        if "diagnosis" not in columns:
-            with self.db:
-                self.db.execute("ALTER TABLE incidents ADD COLUMN diagnosis TEXT")
-                self.db.execute("ALTER TABLE incidents ADD COLUMN diagnosed_at TEXT")
+        with self.db:
+            for column in INCIDENT_COLUMNS:
+                if column not in columns:
+                    self.db.execute(f"ALTER TABLE incidents ADD COLUMN {column} TEXT")
 
     def close(self) -> None:
         self.db.close()
@@ -90,6 +104,13 @@ class Store:
         ).fetchone()
         return row
 
+    def incidents_since(self, moment: datetime, rule: str | None = None) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM incidents WHERE (resolved_at IS NULL OR resolved_at >= ?) "
+            "AND (? IS NULL OR rule = ?) ORDER BY opened_at DESC",
+            (iso(moment), rule, rule),
+        ).fetchall()
+
     def save_diagnosis(self, incident_id: int, diagnosis: str, now: datetime) -> None:
         with self.db:
             self.db.execute(
@@ -97,15 +118,45 @@ class Store:
                 (diagnosis, iso(now), incident_id),
             )
 
+    def save_evidence(self, incident_id: int, pack: str) -> None:
+        with self.db:
+            self.db.execute("UPDATE incidents SET evidence = ? WHERE id = ?", (pack, incident_id))
+
+    def save_review(self, incident_id: int, review: str, now: datetime) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE incidents SET review = ?, reviewed_at = ? WHERE id = ?",
+                (review, iso(now), incident_id),
+            )
+
+    def record(self, events: Iterable[Event], now: datetime) -> None:
+        with self.db:
+            self.db.executemany(
+                "INSERT INTO events (at, kind, severity, incident_id, grp, title, message) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (iso(now), e.kind, e.severity, e.incident_id, e.group, e.title, e.message)
+                    for e in events
+                ],
+            )
+
+    def timeline(self, incident: sqlite3.Row) -> list[sqlite3.Row]:
+        """The incident's own events plus monitoring health changes while it was open."""
+        return self.db.execute(
+            "SELECT * FROM events WHERE incident_id = ? OR (incident_id IS NULL "
+            "AND grp = 'health' AND at >= ? AND (? IS NULL OR at <= ?)) ORDER BY at, id",
+            (incident["id"], incident["opened_at"], *[incident["resolved_at"]] * 2),
+        ).fetchall()
+
     def diagnoses_since(self, moment: datetime) -> int:
         row = self.db.execute(
             "SELECT COUNT(*) FROM incidents WHERE diagnosed_at >= ?", (iso(moment),)
         ).fetchone()
         return int(row[0])
 
-    def open(self, finding: Finding, now: datetime, first_seen: str | None = None) -> None:
+    def open(self, finding: Finding, now: datetime, first_seen: str | None = None) -> int:
         with self.db:
-            self.db.execute(
+            cursor = self.db.execute(
                 "INSERT INTO incidents (fingerprint, rule, severity, summary, value, url, "
                 "opened_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -120,6 +171,7 @@ class Store:
                 ),
             )
             self.db.execute("DELETE FROM pending WHERE fingerprint = ?", (finding.fingerprint,))
+        return int(cursor.lastrowid or 0)
 
     def touch(self, incident_id: int, finding: Finding, now: datetime) -> None:
         with self.db:

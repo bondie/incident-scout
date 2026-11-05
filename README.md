@@ -108,8 +108,8 @@ rules:
   is blind"* notification goes out, and another when telemetry is back. A single broken rule
   is reported the same way, without affecting the others.
 - **No storms.** More events than `max_per_run` in one check collapse into a single summary.
-- **Read-only.** incident-scout only queries telemetry. State lives in one SQLite file
-  (`~/.local/share/incident-scout/state.db`).
+- **Read-only.** incident-scout only queries telemetry. State, history and evidence live in
+  one SQLite file (`~/.local/share/incident-scout/state.db`).
 
 ## Backtesting
 
@@ -144,13 +144,35 @@ by a local model through [Ollama](https://ollama.com), so logs never leave the m
    steps. There are no tool calls and no agent loop, because small local models handle those
    poorly. A fixed pack makes every diagnosis reproducible and testable.
 3. **Follow-up.** The diagnosis replaces the alert in Notification Center and is stored with
-   the incident. `max_per_hour` caps the model's work during an incident storm.
+   the incident, together with the pack it was made from. The pack is kept even when the
+   model fails. `max_per_hour` caps the model's work during an incident storm.
 
 ```bash
-uv run scout investigate --incident 12                  # diagnose an incident again
+uv run scout investigate --incident 12                  # diagnose the stored pack again
 uv run scout investigate --rule http-5xx --label shop=b --at 2026-03-12T14:05 --show-pack
 uv run scout investigate --pack pack.json --model gemma4:12b
 ```
+
+### Was the diagnosis right?
+
+Every incident keeps a timeline of what happened to it (opened, diagnosed, resolved, and
+whether monitoring went blind meanwhile), the evidence pack and the diagnosis. A short
+review records whether the diagnosis was right, and a reviewed incident becomes an eval case,
+so the model choice is checked against your own incidents, not only synthetic ones:
+
+```bash
+uv run scout history --since 30d                     # incidents with diagnosis and review state
+uv run scout show 12 --pack                          # timeline, diagnosis, review, evidence
+uv run scout review 12 --verdict correct --keywords "scan,bot"
+uv run scout review 13 --verdict wrong --cause "Disk full of logs" --category resources \
+    --keywords "disk" --keywords "log"
+uv run scout export-case 12 --out ~/incident-cases    # then: scout eval ~/incident-cases ...
+```
+
+A review takes over the category and scope of the diagnosis unless you correct them, and
+its cause when the verdict is `correct`.
+`--keywords` gives the terms a right cause has to name: each option is one group of
+synonyms, and every group must match, the same as in the case files.
 
 ### Choosing a model
 

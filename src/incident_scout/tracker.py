@@ -59,8 +59,7 @@ def process(
         rule = rules.get(finding.rule)
         if rule is not None and streak < rule.for_runs:
             continue
-        store.open(finding, now, first_seen)
-        events.append(_opened(finding))
+        events.append(_opened(finding, store.open(finding, now, first_seen)))
 
     evaluated = [name for name in result.rules if name not in result.errors]
     store.drop_pending(current, evaluated)
@@ -116,7 +115,7 @@ def _rule_health(store: Store, result: CheckResult, threshold: int) -> list[Even
     return events
 
 
-def _opened(finding: Finding) -> Event:
+def _opened(finding: Finding, incident_id: int) -> Event:
     return Event(
         "opened",
         finding.severity,
@@ -124,6 +123,7 @@ def _opened(finding: Finding) -> Event:
         finding.summary,
         group=finding.fingerprint,
         url=finding.url,
+        incident_id=incident_id,
     )
 
 
@@ -137,6 +137,7 @@ def _resolved(incident: sqlite3.Row, now: datetime) -> Event:
         f"{incident['summary']} (lasted {_duration(lasted.total_seconds())})",
         group=incident["fingerprint"],
         url=incident["url"],
+        incident_id=incident["id"],
     )
 
 
