@@ -41,10 +41,11 @@ async def gather(
     finder = (
         command_precedents(settings.precedents_command) if settings.precedents_command else None
     )
-    async with build_telemetry(config.source) as telemetry:
+    source = next((r.source for r in config.rules if r.name == rule), "default")
+    async with build_telemetry(config.source_options(source)) as telemetry:
         return await collect(
             telemetry,
-            settings.evidence,
+            [query for query in settings.evidence if query.source == source],
             rule,
             severity,
             summary,

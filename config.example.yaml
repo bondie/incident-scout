@@ -20,6 +20,17 @@ source:
 #   # headers: {Authorization: "Bearer ${MCP_TOKEN}"}
 #   tools: {query: vm_query, query_range: vm_query_range, logs: loki_query, alerts: alerts_active}
 
+# More sources, e.g. one Amazon CloudWatch source per AWS account. Rules and evidence pick
+# one with `source: name`, or repeat for several with `sources: [a, b]` (named rule@a, rule@b).
+# A source's vars fill $placeholders only in what runs against it. Credentials come from the
+# usual AWS profile; docs/aws-readonly-policy.json is a minimal read-only IAM policy.
+# sources:
+#   shop-a:
+#     type: cloudwatch
+#     profile: monitoring-shop-a
+#     region: eu-central-1
+#     vars: {shop: shop-a, logs: /ecs/shop-a}
+
 # $name placeholders in queries, summaries and URLs.
 vars:
   prod: 'env="prod"'
@@ -82,9 +93,32 @@ rules:
     query: 'max by (instance) ((time() - backup_last_success_timestamp_seconds{$prod}) / 3600) > 26'
     summary: '{instance}: last backup {value:.0f} h ago'
 
+  # CloudWatch: Metrics Insights cannot filter, so `above`/`below` keep the problems. `since`
+  # is the period; the last complete one is checked.
+  # - name: lb-5xx
+  #   kind: cloudwatch
+  #   sources: [shop-a]
+  #   severity: critical
+  #   query: SELECT SUM(HTTPCode_Target_5XX_Count) FROM SCHEMA("AWS/ApplicationELB", LoadBalancer) GROUP BY LoadBalancer
+  #   since: 5m
+  #   above: 9
+  #   summary: '$shop: {value:.0f}x HTTP 5xx in 5 min'
+  # Logs Insights: name the number `value`; `filter` after `stats` keeps only problems.
+  # - name: worker-errors
+  #   kind: logs_insights
+  #   sources: [shop-a]
+  #   log_groups: ['$logs']
+  #   since: 15m
+  #   query: 'filter level = "error" | stats count(*) as value by worker | filter value >= 20'
+  #   summary: '$shop: {worker} failed {value:.0f}x in 15 min'
+  #   resolve_after: 36    # recurs every hour or so: keep one incident open for 3 h
+
 # Optional: diagnose every new incident with a local model (Ollama) and follow up on its
 # notification. Evidence queries see the incident's labels as $label and the evidence
-# window as $window. `promql` and `logql` give a timeline, `logql_top` one total per series.
+# window as $window. `promql`, `logql` and `cloudwatch` give a timeline, `logql_top` one total
+# per series, `logs_insights` either (a timeline when it groups by bin()), and `ecs_events`
+# the deployments and service events of the ECS cluster named by the query. A query runs
+# only for incidents of rules on its source.
 # investigator:
 #   model: gemma4:12b                # pick yours with `scout eval eval/cases --models ...`
 #   think: false                     # fast mode; thinking rarely pays off for this task
@@ -113,3 +147,7 @@ rules:
 #     - name: CPU load
 #       kind: promql
 #       query: 'max(node_load1{app="$app"})'
+#     - name: Deployments and service events
+#       kind: ecs_events
+#       sources: [shop-a]
+#       query: $shop-cluster

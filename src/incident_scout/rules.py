@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import math
 import re
-from collections.abc import Mapping
+import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 from .models import SEVERITIES, Alert, Finding, Series, Severity
-from .sources.base import Telemetry
+from .sources.base import SourceError, Telemetry, parse_duration
+from .sources.cloudwatch import CloudWatchTelemetry
 
-RuleKind = Literal["promql", "logql", "alertmanager"]
+RuleKind = Literal["promql", "logql", "alertmanager", "cloudwatch", "logs_insights"]
+METRIC_DELAY = 60  # CloudWatch publishes a period's datapoint about a minute after it ends
 _PLACEHOLDER = re.compile(r"\{(\w+)(?::([^}]*))?\}")
 
 
@@ -17,7 +21,11 @@ class Rule:
     """A query that returns only what is wrong, like a Prometheus alerting rule.
 
     `for_runs` is how many consecutive checks must see a problem before it is reported,
-    `key_labels` identify one problem (default: every label of the series).
+    `key_labels` identify one problem (default: every label of the series). `above` and
+    `below` keep only series past a threshold, for query languages that cannot filter
+    (CloudWatch Metrics Insights). `since` is the look-back of log queries and the period of
+    CloudWatch metrics. `resolve_after` overrides the global number of clean checks before an
+    incident is resolved, so a problem that recurs every hour stays one incident.
     """
 
     name: str
@@ -30,16 +38,43 @@ class Rule:
     since: str = "1m"
     match: Mapping[str, str] = field(default_factory=dict)
     url: str | None = None
+    source: str = "default"
+    log_groups: tuple[str, ...] = ()
+    above: float | None = None
+    below: float | None = None
+    resolve_after: int | None = None
+
+    def breached(self, value: float) -> bool:
+        if self.above is not None and value <= self.above:
+            return False
+        return self.below is None or value < self.below
 
 
-async def evaluate(rule: Rule, telemetry: Telemetry) -> list[Finding]:
-    if rule.kind == "promql":
-        return [_series_finding(rule, s) for s in await telemetry.query(rule.query)]
-    if rule.kind == "logql":
-        return [_series_finding(rule, s) for s in await telemetry.logs(rule.query, rule.since)]
+async def evaluate(rule: Rule, telemetry: Telemetry, now: float | None = None) -> list[Finding]:
     if rule.kind == "alertmanager":
         return [_alert_finding(rule, a) for a in await telemetry.alerts() if _matches(rule, a)]
+    series = await _series(rule, telemetry, now or time.time())
+    return [_series_finding(rule, s) for s in series if rule.breached(s.last)]
+
+
+async def _series(rule: Rule, telemetry: Telemetry, now: float) -> Sequence[Series]:
+    if rule.kind == "promql":
+        return await telemetry.query(rule.query)
+    if rule.kind == "logql":
+        return await telemetry.logs(rule.query, rule.since)
+    window = parse_duration(rule.since)
+    if rule.kind == "cloudwatch":
+        end = math.floor((now - METRIC_DELAY) / window) * window
+        return await cloudwatch(telemetry).metrics(rule.query, end - window, end, window)
+    if rule.kind == "logs_insights":
+        return await cloudwatch(telemetry).log_query(rule.log_groups, rule.query, now - window, now)
     raise ValueError(f"Unknown rule kind {rule.kind!r}")
+
+
+def cloudwatch(telemetry: Telemetry) -> CloudWatchTelemetry:
+    if not isinstance(telemetry, CloudWatchTelemetry):
+        raise SourceError("cloudwatch and logs_insights queries need a cloudwatch source")
+    return telemetry
 
 
 def series_key(rule: Rule, labels: Mapping[str, str]) -> str:

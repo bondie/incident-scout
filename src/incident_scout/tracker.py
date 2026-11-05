@@ -67,7 +67,9 @@ def process(
     for incident in store.open_incidents():
         if incident["fingerprint"] in current or incident["rule"] in result.errors:
             continue
-        if incident["rule"] in rules and store.miss(incident["id"]) < resolve_after:
+        rule = rules.get(incident["rule"])
+        limit = (rule.resolve_after if rule else None) or resolve_after
+        if rule is not None and store.miss(incident["id"]) < limit:
             continue
         store.resolve(incident["id"], now)
         events.append(_resolved(incident, now))

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 
 from .models import Finding, Series
-from .rules import Rule, evaluate, series_key
-from .sources.base import Telemetry
+from .rules import Rule, cloudwatch, evaluate, series_key
+from .sources.base import Telemetry, parse_duration
 from .tracker import CheckResult
 
 BACKTEST_CHUNK = 86400
@@ -18,22 +19,37 @@ _RANGE_SELECTOR = re.compile(r"\[(\d+[smhdw])\]")
 
 
 async def run_check(
-    connection: AbstractAsyncContextManager[Telemetry], rules: Sequence[Rule]
+    connections: Mapping[str, AbstractAsyncContextManager[Telemetry]], rules: Sequence[Rule]
 ) -> CheckResult:
-    """Evaluate every rule; a failing rule is recorded, never fatal for the others."""
-    names = [rule.name for rule in rules]
+    """Evaluate every rule against its source, sources in parallel; a failing rule or source is
+    recorded, never fatal for the others."""
+    groups = [
+        (connection, [rule for rule in rules if rule.source == source])
+        for source, connection in connections.items()
+    ]
+    results = await asyncio.gather(*(_check_source(c, group) for c, group in groups if group))
+    findings = [finding for found, _ in results for finding in found]
+    errors = {rule: error for _, failed in results for rule, error in failed.items()}
+    unknown = {rule.name for rule in rules if rule.source not in connections}
+    errors.update(dict.fromkeys(unknown, "no connection for its source"))
+    return CheckResult(findings, [rule.name for rule in rules], errors)
+
+
+async def _check_source(
+    connection: AbstractAsyncContextManager[Telemetry], rules: Sequence[Rule]
+) -> tuple[list[Finding], dict[str, str]]:
+    findings: list[Finding] = []
+    errors: dict[str, str] = {}
     try:
         async with connection as telemetry:
-            findings: list[Finding] = []
-            errors: dict[str, str] = {}
             for rule in rules:
                 try:
                     findings += await evaluate(rule, telemetry)
                 except Exception as error:
                     errors[rule.name] = describe(error)
-            return CheckResult(findings, names, errors)
     except Exception as error:
-        return CheckResult([], names, dict.fromkeys(names, describe(error)))
+        return [], dict.fromkeys((rule.name for rule in rules), describe(error))
+    return findings, errors
 
 
 def describe(error: BaseException) -> str:
@@ -63,6 +79,10 @@ async def backtest(
     """Replay a rule over history and group the moments it fired into episodes."""
     if rule.kind == "alertmanager":
         raise ValueError("Alertmanager rules have no history; replay ALERTS{} as a promql rule")
+    if rule.kind == "logs_insights":
+        raise ValueError("logs_insights rules cannot be replayed yet")
+    if rule.kind == "cloudwatch":
+        return await _replay_metrics(rule, telemetry, start, end)
     series: list[Series] = []
     if rule.kind == "logql":
         series, step = await _replay_logs(rule.query, telemetry, start, end, step)
@@ -73,6 +93,20 @@ async def backtest(
             series += await telemetry.query_range(rule.query, chunk_start, chunk_end, step)
             chunk_start = chunk_end
     return episodes(rule, series, step)
+
+
+async def _replay_metrics(
+    rule: Rule, telemetry: Telemetry, start: float, end: float
+) -> list[Episode]:
+    """The rule's period is its step, so a replay sees the same sums and averages as a check."""
+    period = parse_duration(rule.since)
+    series: list[Series] = []
+    chunk_start = start
+    while chunk_start < end:
+        chunk_end = min(end, chunk_start + BACKTEST_CHUNK)
+        series += await cloudwatch(telemetry).metrics(rule.query, chunk_start, chunk_end, period)
+        chunk_start = chunk_end
+    return episodes(rule, series, period)
 
 
 async def _replay_logs(
@@ -108,7 +142,8 @@ def with_offset(query: str, seconds: int) -> str:
 def episodes(rule: Rule, series: Sequence[Series], step: int) -> list[Episode]:
     by_key: dict[str, list[tuple[float, float]]] = {}
     for item in series:
-        by_key.setdefault(series_key(rule, item.labels), []).extend(item.points)
+        points = [(t, v) for t, v in item.points if rule.breached(v)]
+        by_key.setdefault(series_key(rule, item.labels), []).extend(points)
     result = []
     for key, raw in by_key.items():
         points = sorted(set(raw))
