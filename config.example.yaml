@@ -86,7 +86,8 @@ rules:
 # notification. Evidence queries see the incident's labels as $label and the evidence
 # window as $window. `promql` and `logql` give a timeline, `logql_top` one total per series.
 # investigator:
-#   model: gemma4:26b                # pick yours with `scout eval eval/cases --models ...`
+#   model: gemma4:12b                # pick yours with `scout eval eval/cases --models ...`
+#   think: false                     # fast mode; thinking rarely pays off for this task
 #   url: http://localhost:11434
 #   language: English
 #   before_minutes: 30
@@ -102,6 +103,10 @@ rules:
 #     - name: Top errors in the window
 #       kind: logql_top
 #       query: 'topk(6, sum by (message) (count_over_time({job="app", app="$app"} | json | level="error" [$window])))'
+#     - name: Top external clients in the window (say what normal traffic is, or the
+#             model blames your own frontend for a scan)
+#       kind: logql_top
+#       query: 'topk(5, sum by (src) (count_over_time({job="nginx", app="$app"} | json | src !~ "10[.].*" [$window])))'
 #     - name: Probe success, all sites
 #       kind: promql
 #       query: 'min by (instance) (probe_success)'

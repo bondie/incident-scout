@@ -100,6 +100,7 @@ class OllamaInvestigator:
     think: bool | str | None = None
     timeout: float = 300
     num_ctx: int = 16384
+    max_tokens: int = 8192  # thinking included; stops models that never close the JSON
     transport: httpx.BaseTransport | None = None
 
     def diagnose(self, pack: EvidencePack) -> Diagnosis:
@@ -107,7 +108,11 @@ class OllamaInvestigator:
             "model": self.model,
             "stream": False,
             "format": SCHEMA,
-            "options": {"temperature": 0, "num_ctx": self.num_ctx},
+            "options": {
+                "temperature": 0,
+                "num_ctx": self.num_ctx,
+                "num_predict": self.max_tokens,
+            },
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT.format(language=self.language)},
                 {"role": "user", "content": pack.render()},
@@ -119,6 +124,10 @@ class OllamaInvestigator:
         try:
             with httpx.Client(transport=self.transport, timeout=self.timeout) as client:
                 response = client.post(f"{self.url.rstrip('/')}/api/chat", json=payload)
+                if response.status_code == httpx.codes.NOT_IMPLEMENTED:
+                    response = client.post(
+                        f"{self.url.rstrip('/')}/api/chat", json=_without_schema(payload)
+                    )
                 response.raise_for_status()
         except httpx.HTTPError as error:
             raise InvestigationError(f"{self.model}: {error}") from error
@@ -140,7 +149,24 @@ class OllamaInvestigator:
             response.raise_for_status()
 
 
+def _without_schema(payload: dict[str, Any]) -> dict[str, Any]:
+    """Some model runtimes reject constrained output; describe the schema in the prompt instead."""
+    fields = []
+    for key, spec in SCHEMA["properties"].items():
+        kind = "one of: " + " | ".join(spec["enum"]) if "enum" in spec else spec["type"]
+        fields.append(f'"{key}": {kind}')
+    shape = "; ".join(fields)
+    system = f"{payload['messages'][0]['content']}\nReturn one JSON object with these keys: {shape}"
+    messages = [{"role": "system", "content": system}, *payload["messages"][1:]]
+    return {key: value for key, value in payload.items() if key != "format"} | {
+        "messages": messages
+    }
+
+
 def parse_diagnosis(content: str, model: str = "", seconds: float = 0.0) -> Diagnosis:
+    start, end = content.find("{"), content.rfind("}")
+    if start > 0 and end > start:  # tolerate prose or a ```json fence around the object
+        content = content[start : end + 1]
     try:
         data = json.loads(content)
     except ValueError as error:
@@ -164,5 +190,7 @@ def parse_diagnosis(content: str, model: str = "", seconds: float = 0.0) -> Diag
 
 
 def _choice(value: Any, allowed: tuple[str, ...]) -> str:
-    text = str(value)
+    if isinstance(value, list) and len(value) == 1:
+        value = value[0]
+    text = str(value).strip().lower()
     return text if text in allowed else "unknown"
