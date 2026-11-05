@@ -5,8 +5,8 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 **A second pair of eyes on your production, running on your laptop.** incident-scout checks
-Prometheus (or VictoriaMetrics), Loki and Alertmanager every five minutes with deterministic
-rules. It sends one notification when a problem starts and one when it is gone. It also tells
+Prometheus (or VictoriaMetrics), Loki, Alertmanager and Amazon CloudWatch every five minutes
+with deterministic rules. It sends one notification when a problem starts and one when it is gone. It also tells
 you when it cannot see anything, instead of staying silent.
 
 Team alerting is usually tuned for outages that last long enough to page someone. Short,
@@ -46,8 +46,9 @@ mkdir -p ~/.config/incident-scout
 cp config.example.yaml ~/.config/incident-scout/config.yaml
 ```
 
-The telemetry comes either from the standard HTTP APIs (`type: http`) or from an MCP server
-that wraps them (`type: mcp`). If that MCP server is already registered in Claude Code,
+The telemetry comes from the standard HTTP APIs (`type: http`), from an MCP server that
+wraps them (`type: mcp`), or from Amazon CloudWatch (`type: cloudwatch`, see
+[below](#amazon-cloudwatch)). If the MCP server is already registered in Claude Code,
 `claude_mcp_server: <name>` reuses its URL and credentials, so no token is copied into
 another file.
 
@@ -93,9 +94,42 @@ rules:
 |---|---|---|
 | `promql` | instant query | Range-based rules (`avg_over_time(...[15m]) < 0.7`) catch flapping that single samples miss |
 | `logql` | Loki metric query, latest point | Aggregate in the query; raw log lines are not supported |
-| `alertmanager` | active, unsilenced alerts | `match` filters labels by regex, severity comes from the alert's label |
+| `alertmanager` | active, unsilenced alerts | `match` filters labels by regex, severity comes from the alert's label; on a CloudWatch source, alarms in the ALARM state |
+| `cloudwatch` | Metrics Insights query or metric math, last complete period | `since` is the period; `above` or `below` keeps only the problems |
+| `logs_insights` | Logs Insights query over the last `since` | Name the number `value`; `filter` after `stats` keeps only the problems |
 
 `vars` defines `$name` placeholders, so a label selector shared by many rules is written once.
+`resolve_after` on a rule overrides the global one, so a failure that recurs every hour stays
+one incident instead of a notification every hour.
+
+## Amazon CloudWatch
+
+Each AWS account is one named source. A rule or an evidence query with `sources: [a, b]` runs
+once per account, as `rule@a` and `rule@b`, and the source's `vars` fill its placeholders,
+so one rule covers several accounts with the same layout:
+
+```yaml
+sources:
+  shop-a: {type: cloudwatch, profile: monitoring-shop-a, region: eu-central-1,
+           vars: {shop: shop-a, logs: /ecs/shop-a}}
+  shop-b: {type: cloudwatch, profile: monitoring-shop-b, region: eu-central-1,
+           vars: {shop: shop-b, logs: /ecs/shop-b}}
+
+rules:
+  - name: lb-5xx
+    kind: cloudwatch
+    sources: [shop-a, shop-b]
+    query: SELECT SUM(HTTPCode_Target_5XX_Count) FROM SCHEMA("AWS/ApplicationELB", LoadBalancer) GROUP BY LoadBalancer
+    above: 9
+    summary: '$shop: {value:.0f}x HTTP 5xx in 5 min'
+```
+
+Credentials come from an ordinary AWS profile. A monitor that runs unattended needs keys that
+do not expire after a few hours, so give it its own read-only IAM user:
+[docs/aws-readonly-policy.json](docs/aws-readonly-policy.json) allows reading metrics and
+alarms, Logs Insights queries on the log groups you name, and the ECS service list for
+deployments, nothing else. Metric rules are cheap; a Logs Insights rule scans its whole
+window on every check, so keep log rules few and windows short.
 
 ## How it behaves
 
@@ -114,7 +148,9 @@ rules:
 ## Backtesting
 
 `scout backtest` replays `promql` rules through range queries in daily chunks and groups the
-moments a rule fired into episodes. It counts only episodes long enough to pass `for_runs`.
+moments a rule fired into episodes. `cloudwatch` rules are replayed the same way, with their
+own period as the step and their threshold applied to every point; `logs_insights` rules
+cannot be replayed yet. It counts only episodes long enough to pass `for_runs`.
 Some MCP servers let log queries look back only from "now", without setting a step. For
 those, `logql` rules are replayed in 12-hour chunks reached with LogQL `offset`, so the
 server's automatic step stays below the rule's window and short spikes are not stepped over.
@@ -136,7 +172,11 @@ by a local model through [Ollama](https://ollama.com), so logs never leave the m
 1. **Evidence pack.** Deterministic queries from the config run over a window around the
    start (30 minutes before, 10 after): 5xx and request timelines, the most frequent error
    messages, paths, user agents and clients, probe results of the whole fleet, services that
-   are down, CPU, memory and disk. Similar past tickets come from
+   are down, CPU, memory and disk. On AWS the same questions are answered by CloudWatch
+   metrics and Logs Insights, plus the ECS deployments and service events in the window.
+   Without the deployments, a short burst of 5xx during a rollout was blamed on the one
+   unrelated exception that happened to be logged; with them, the model tied it to the
+   deployment. Similar past tickets come from
    [ticket-precedent](https://github.com/bondie/ticket-precedent), searched with the top
    error message.
 2. **One model call.** The model gets the pack and must answer in a JSON schema: summary,

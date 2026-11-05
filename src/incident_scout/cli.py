@@ -361,9 +361,9 @@ def _report(args: argparse.Namespace) -> int:
 
 def _run(config: Config) -> CheckResult:
     async def bounded() -> CheckResult:
-        return await asyncio.wait_for(
-            run_check(build_telemetry(config.source), config.rules), config.timeout_seconds
-        )
+        used = dict.fromkeys(rule.source for rule in config.rules)
+        connections = {name: build_telemetry(config.source_options(name)) for name in used}
+        return await asyncio.wait_for(run_check(connections, config.rules), config.timeout_seconds)
 
     try:
         return asyncio.run(bounded())
@@ -564,10 +564,10 @@ def _backtest(args: argparse.Namespace) -> int:
     start = end - parse_duration(args.since)
     step = parse_duration(args.step)
 
-    async def replay() -> int:
-        async with build_telemetry(config.source) as telemetry:
+    async def replay(source: str) -> None:
+        async with build_telemetry(config.source_options(source)) as telemetry:
             for rule in rules:
-                if rule.kind == "alertmanager":
+                if rule.source != source or rule.kind == "alertmanager":
                     continue
                 try:
                     found = await backtest(rule, telemetry, start, end, step)
@@ -583,9 +583,13 @@ def _backtest(args: argparse.Namespace) -> int:
                         f"   {_local_ts(episode.start)} - {_local_ts(episode.end)} "
                         f"{episode.minutes:5.0f} min  peak {episode.peak:g}  {episode.key}"
                     )
-        return 0
 
-    return asyncio.run(replay())
+    for source in dict.fromkeys(rule.source for rule in rules):
+        try:
+            asyncio.run(replay(source))
+        except Exception as error:
+            print(f"source {source}: failed: {error}")
+    return 0
 
 
 def _notify_test(args: argparse.Namespace) -> int:

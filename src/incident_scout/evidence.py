@@ -16,9 +16,10 @@ from typing import Literal
 
 from .engine import with_offset
 from .models import Series
+from .rules import cloudwatch
 from .sources.base import Telemetry
 
-EvidenceKind = Literal["promql", "logql", "logql_top"]
+EvidenceKind = Literal["promql", "logql", "logql_top", "cloudwatch", "logs_insights", "ecs_events"]
 STEP = 300
 
 
@@ -26,15 +27,20 @@ STEP = 300
 class EvidenceQuery:
     """One thing to look at around an incident.
 
-    `promql` and `logql` give a timeline over the window (keep logql to one or two series),
-    `logql_top` gives one total per series over the whole window, written as `[$window]`.
-    `$label` placeholders take the incident's labels, e.g. `shop="$shop"`.
+    `promql`, `logql` and `cloudwatch` give a timeline over the window (keep logql to one or
+    two series), `logql_top` gives one total per series over the whole window, written as
+    `[$window]`. `logs_insights` gives a timeline when it groups by `bin(...)` and totals
+    otherwise. `ecs_events` lists deployments and service events of the ECS cluster named
+    by the query. `$label` placeholders take the incident's labels, e.g. `shop="$shop"`.
+    A query only runs for incidents of rules on its `source`.
     """
 
     name: str
     kind: EvidenceKind
     query: str
     limit: int = 8
+    source: str = "default"
+    log_groups: tuple[str, ...] = ()
 
 
 @dataclass
@@ -128,16 +134,33 @@ async def _section(
     if query.kind == "promql":
         series = await telemetry.query_range(text, start, end, STEP)
         return _timeline(series, start, end, query.limit)
+    if query.kind == "cloudwatch":
+        series = await cloudwatch(telemetry).metrics(text, start, end, STEP)
+        return _timeline(series, start, end, query.limit)
+    if query.kind == "ecs_events":
+        events = await cloudwatch(telemetry).service_events(text, start, end)
+        return [f"{_clock(moment)}  {name}: {message}" for moment, name, message in events][
+            -query.limit :
+        ]
+    if query.kind == "logs_insights":
+        series = await cloudwatch(telemetry).log_query(query.log_groups, text, start, end)
+        if "bin(" in text:
+            return _timeline(series, start, end, query.limit)
+        return _totals(series, query.limit)
     offset = int(now - end)
     window = int(end - start)
     if query.kind == "logql_top":
         text = text.replace("$window", f"{window}s")
         series = await telemetry.logs(with_offset(text, offset), "10s")
-        totals = sorted(series, key=lambda s: -s.last)[: query.limit]
-        return [f"{s.last:>6.0f}x  {_labels(s.labels)}" for s in totals]
+        return _totals(series, query.limit)
     series = await telemetry.logs(with_offset(text, offset), f"{max(1, window // 60)}m")
     shifted = [Series(s.labels, [(t - offset, v) for t, v in s.points]) for s in series]
     return _timeline(shifted, start, end, query.limit)
+
+
+def _totals(series: Sequence[Series], limit: int) -> list[str]:
+    top = sorted(series, key=lambda s: -s.last)[:limit]
+    return [f"{s.last:>6.0f}x  {_labels(s.labels)}" for s in top]
 
 
 def _timeline(series: Sequence[Series], start: float, end: float, limit: int) -> list[str]:

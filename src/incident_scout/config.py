@@ -16,10 +16,13 @@ import yaml
 from .evidence import EvidenceKind, EvidenceQuery
 from .models import SEVERITIES
 from .rules import Rule, RuleKind
+from .sources.cloudwatch import CloudWatchTelemetry
 from .sources.http import HttpTelemetry
 from .sources.mcp import McpTelemetry, McpTools
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+CLOUDWATCH_KINDS = ("cloudwatch", "logs_insights")
+DEFAULT = "default"
 
 
 class ConfigError(ValueError):
@@ -75,6 +78,7 @@ class QuietHours:
 class Config:
     source: Mapping[str, Any]
     rules: list[Rule]
+    sources: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     state_path: Path = field(default_factory=lambda: data_dir() / "state.db")
     interval_minutes: int = 5
@@ -89,6 +93,13 @@ class Config:
             if rule.name == name:
                 return rule
         raise ConfigError(f"Unknown rule {name!r}; known: {', '.join(r.name for r in self.rules)}")
+
+    def source_options(self, name: str = DEFAULT) -> Mapping[str, Any]:
+        if name == DEFAULT:
+            return self.source
+        if name not in self.sources:
+            raise ConfigError(f"Unknown source {name!r}")
+        return self.sources[name]
 
 
 def config_dir() -> Path:
@@ -114,7 +125,8 @@ def load_config(path: Path | None = None) -> Config:
     env = _environment(path.parent, raw.get("env_files") or [])
     raw = _expand(raw, env)
     variables = {str(k): str(v) for k, v in (raw.get("vars") or {}).items()}
-    rules = [_rule(item, variables) for item in raw.get("rules") or []]
+    sources = _sources(raw)
+    rules = [rule for item in raw.get("rules") or [] for rule in _rules(item, variables, sources)]
     names = [rule.name for rule in rules]
     if len(names) != len(set(names)):
         raise ConfigError("Rule names must be unique")
@@ -129,11 +141,62 @@ def load_config(path: Path | None = None) -> Config:
     if raw.get("quiet_hours"):
         options["quiet_hours"] = _quiet_hours(raw["quiet_hours"])
     if raw.get("investigator"):
-        options["investigator"] = _investigator(raw["investigator"], variables)
-    return Config(source=raw.get("source") or {}, rules=rules, notify=notify, **options)
+        options["investigator"] = _investigator(raw["investigator"], variables, sources)
+    named = {name: value for name, value in sources.items() if name != DEFAULT}
+    return Config(source=sources[DEFAULT], rules=rules, sources=named, notify=notify, **options)
 
 
-def _investigator(value: Mapping[str, Any], variables: Mapping[str, str]) -> InvestigatorConfig:
+def _sources(raw: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    sources: dict[str, Mapping[str, Any]] = {DEFAULT: raw.get("source") or {}}
+    for name, options in (raw.get("sources") or {}).items():
+        if name == DEFAULT:
+            raise ConfigError("`default` is reserved for the `source` section")
+        sources[str(name)] = dict(options or {})
+    return sources
+
+
+def _targets(item: dict[str, Any], where: str) -> list[str | None]:
+    """`sources: [a, b]` repeats an item for every source; None keeps a single item as it is."""
+    targets = item.pop("sources", None)
+    if targets is None:
+        return [None]
+    if isinstance(targets, str) or not targets:
+        raise ConfigError(f"{where}.sources must be a list of source names")
+    return [str(target) for target in targets]
+
+
+def _variables(
+    variables: Mapping[str, str], sources: Mapping[str, Mapping[str, Any]], name: str
+) -> dict[str, str]:
+    if name not in sources:
+        raise ConfigError(f"Unknown source {name!r}; known: {', '.join(sources)}")
+    own = {
+        str(key): Template(str(value)).safe_substitute(variables)
+        for key, value in (sources[name].get("vars") or {}).items()
+    }
+    return {**variables, "source": name, **own}
+
+
+def _rules(
+    item: Mapping[str, Any],
+    variables: Mapping[str, str],
+    sources: Mapping[str, Mapping[str, Any]],
+) -> list[Rule]:
+    data = dict(item)
+    rules = []
+    for target in _targets(data, f"rules.{data.get('name') or '?'}"):
+        copy = dict(data)
+        if target is not None:
+            copy |= {"name": f"{data.get('name')}@{target}", "source": target}
+        rules.append(_rule(copy, _variables(variables, sources, copy.get("source", DEFAULT))))
+    return rules
+
+
+def _investigator(
+    value: Mapping[str, Any],
+    variables: Mapping[str, str],
+    sources: Mapping[str, Mapping[str, Any]],
+) -> InvestigatorConfig:
     data = dict(value)
     if not data.get("model"):
         raise ConfigError("investigator.model is required, e.g. qwen3.8:27b")
@@ -142,8 +205,14 @@ def _investigator(value: Mapping[str, Any], variables: Mapping[str, str]) -> Inv
         query = dict(item)
         if query.get("kind") not in get_args(EvidenceKind):
             raise ConfigError(f"investigator.evidence kind must be one of {get_args(EvidenceKind)}")
-        query["query"] = Template(str(query.get("query", ""))).safe_substitute(variables)
-        queries.append(cast(EvidenceQuery, _build(EvidenceQuery, query, "investigator.evidence")))
+        for target in _targets(query, "investigator.evidence"):
+            copy = dict(query) | ({"source": target} if target else {})
+            known = _variables(variables, sources, copy.get("source", DEFAULT))
+            copy["query"] = Template(str(copy.get("query", ""))).safe_substitute(known)
+            copy["log_groups"] = _substituted(copy.get("log_groups") or (), known)
+            queries.append(
+                cast(EvidenceQuery, _build(EvidenceQuery, copy, "investigator.evidence"))
+            )
     data["evidence"] = tuple(queries)
     command = data.get("precedents_command") or ()
     data["precedents_command"] = tuple(
@@ -171,13 +240,25 @@ def _clock(value: Any, where: str) -> time:
         raise ConfigError(f"{where} must look like '22:00', got {value!r}") from error
 
 
-def build_telemetry(source: Mapping[str, Any]) -> McpTelemetry | HttpTelemetry:
+def build_telemetry(
+    source: Mapping[str, Any],
+) -> McpTelemetry | HttpTelemetry | CloudWatchTelemetry:
     options = dict(source)
+    options.pop("vars", None)
     kind = options.pop("type", "mcp")
     if kind == "http":
         return cast(HttpTelemetry, _build(HttpTelemetry, options, "source"))
+    if kind == "cloudwatch":
+        allowed = {
+            key: options[key] for key in ("profile", "region", "query_timeout") if key in options
+        }
+        if set(options) - set(allowed):
+            raise ConfigError(
+                f"source: unknown option(s) {', '.join(sorted(set(options) - set(allowed)))}"
+            )
+        return CloudWatchTelemetry(**allowed)
     if kind != "mcp":
-        raise ConfigError(f"Unknown source type {kind!r}, expected mcp or http")
+        raise ConfigError(f"Unknown source type {kind!r}, expected mcp, http or cloudwatch")
     tools = _build(McpTools, options.pop("tools", None) or {}, "source.tools")
     server = options.pop("claude_mcp_server", None)
     if server:
@@ -219,9 +300,20 @@ def _rule(item: Mapping[str, Any], variables: Mapping[str, str]) -> Rule:
             data[key] = Template(data[key]).safe_substitute(variables)
     if "key_labels" in data:
         data["key_labels"] = tuple(data["key_labels"])
+    if "log_groups" in data:
+        data["log_groups"] = _substituted(data["log_groups"], variables)
     if data["kind"] != "alertmanager" and not data.get("query"):
         raise ConfigError(f"rules.{name}.query is required")
+    if data["kind"] in CLOUDWATCH_KINDS:
+        data.setdefault("since", "5m")
+    if data["kind"] == "logs_insights" and not data.get("log_groups"):
+        raise ConfigError(f"rules.{name}.log_groups is required for logs_insights")
     return cast(Rule, _build(Rule, data, f"rules.{name}"))
+
+
+def _substituted(values: Any, variables: Mapping[str, str]) -> tuple[str, ...]:
+    items = [values] if isinstance(values, str) else list(values)
+    return tuple(Template(str(item)).safe_substitute(variables) for item in items)
 
 
 def _build(cls: Any, values: Mapping[str, Any], where: str) -> Any:

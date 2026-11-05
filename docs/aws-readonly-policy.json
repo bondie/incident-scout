@@ -1,0 +1,29 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Metrics",
+      "Effect": "Allow",
+      "Action": ["cloudwatch:GetMetricData", "cloudwatch:ListMetrics", "cloudwatch:DescribeAlarms"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LogQueries",
+      "Effect": "Allow",
+      "Action": ["logs:StartQuery"],
+      "Resource": ["arn:aws:logs:REGION:ACCOUNT_ID:log-group:/your/app/logs*"]
+    },
+    {
+      "Sid": "LogQueryResults",
+      "Effect": "Allow",
+      "Action": ["logs:DescribeLogGroups", "logs:GetQueryResults", "logs:StopQuery"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "Deployments",
+      "Effect": "Allow",
+      "Action": ["ecs:ListServices", "ecs:DescribeServices"],
+      "Resource": "*"
+    }
+  ]
+}

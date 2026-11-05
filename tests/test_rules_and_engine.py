@@ -74,7 +74,7 @@ def test_one_failing_rule_does_not_hide_the_others():
         metrics={"disk > 0.85": [series(0.9, shop="a")]},
         logs={ERRORS.query: SourceError("loki is down")},
     )
-    result = run(run_check(telemetry, [ERRORS, DISK]))
+    result = run(run_check({"default": telemetry}, [ERRORS, DISK]))
     assert [f.rule for f in result.findings] == ["disk"]
     assert result.errors == {"http-5xx": "SourceError: loki is down"}
     assert not result.blind
@@ -86,7 +86,7 @@ class Unreachable(FakeTelemetry):
 
 
 def test_unreachable_telemetry_fails_every_rule():
-    result = run(run_check(Unreachable(), [ERRORS, DISK]))
+    result = run(run_check({"default": Unreachable()}, [ERRORS, DISK]))
     assert result.blind
     assert set(result.errors.values()) == {"ConnectionError: VPN is off"}
 
