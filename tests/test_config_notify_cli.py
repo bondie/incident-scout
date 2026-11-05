@@ -287,3 +287,8 @@ def test_cli_check_rests_during_quiet_hours(
     assert capsys.readouterr().out == ""
     assert cli.main([*args, "--force"]) == 0
     assert "check:" in capsys.readouterr().out
+
+
+def test_tests_cannot_touch_the_real_launch_agents():
+    with pytest.raises(AssertionError, match="must not run launchctl"):
+        launchd.uninstall()

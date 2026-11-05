@@ -151,3 +151,13 @@ rules:
 #       kind: ecs_events
 #       sources: [shop-a]
 #       query: $shop-cluster
+
+# Optional: propose a ticket for the PM when an incident lasts or keeps coming back. Needs the
+# investigator. The card goes to a Teams channel; its buttons open `scout serve` on this machine.
+# tickets:
+#   teams_url: ${TEAMS_INCIDENTS_URL}   # Workflows "Send webhook alerts to a channel", anyone
+#   after_minutes: 30                    # an incident open this long
+#   recurring: 3                         # or the third incident of the same problem ...
+#   recurring_days: 7                    # ... within this many days
+#   max_per_hour: 4
+#   port: 8765                           # the local decision page

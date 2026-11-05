@@ -15,19 +15,23 @@ from pathlib import Path
 from typing import Any
 
 LABEL = "dev.incident-scout.check"
+SERVER_LABEL = "dev.incident-scout.serve"
 
 Runner = Callable[..., Any]
 
 
-def plist_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+def plist_path(label: str = LABEL) -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
 
 
 def log_path() -> Path:
     return Path.home() / "Library" / "Logs" / "incident-scout.log"
 
 
-def agent(project_dir: Path, config_path: Path, interval_minutes: int) -> dict[str, Any]:
+def agent(
+    project_dir: Path, config_path: Path, interval_minutes: int, command: str = "check"
+) -> dict[str, Any]:
+    """A periodic `scout check`, or with command="serve" the decision page kept running."""
     uv = shutil.which("uv")
     if uv is None:
         raise RuntimeError("uv is not on PATH")
@@ -36,8 +40,8 @@ def agent(project_dir: Path, config_path: Path, interval_minutes: int) -> dict[s
             [str(Path(uv).parent), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
         )
     )
-    return {
-        "Label": LABEL,
+    definition: dict[str, Any] = {
+        "Label": LABEL if command == "check" else SERVER_LABEL,
         "ProgramArguments": [
             uv,
             "--directory",
@@ -48,34 +52,46 @@ def agent(project_dir: Path, config_path: Path, interval_minutes: int) -> dict[s
             "scout",
             "--config",
             str(config_path),
-            "check",
+            command,
         ],
-        "StartInterval": interval_minutes * 60,
         "RunAtLoad": True,
         "ProcessType": "Background",
         "EnvironmentVariables": {"PATH": path},
         "StandardOutPath": str(log_path()),
         "StandardErrorPath": str(log_path()),
     }
+    if command == "check":
+        definition["StartInterval"] = interval_minutes * 60
+    if command != "check":
+        definition["KeepAlive"] = True
+    return definition
 
 
 def install(
-    project_dir: Path, config_path: Path, interval_minutes: int, runner: Runner = subprocess.run
+    project_dir: Path,
+    config_path: Path,
+    interval_minutes: int,
+    runner: Runner | None = None,
+    command: str = "check",
 ) -> Path:
-    target = plist_path()
+    definition = agent(project_dir, config_path, interval_minutes, command)
+    label = definition["Label"]
+    target = plist_path(label)
     target.parent.mkdir(parents=True, exist_ok=True)
     log_path().parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(plistlib.dumps(agent(project_dir, config_path, interval_minutes)))
+    target.write_bytes(plistlib.dumps(definition))
     domain = f"gui/{os.getuid()}"
-    runner(["/bin/launchctl", "bootout", f"{domain}/{LABEL}"], check=False, capture_output=True)
-    runner(["/bin/launchctl", "bootstrap", domain, str(target)], check=True)
+    run = runner or subprocess.run
+    run(["/bin/launchctl", "bootout", f"{domain}/{label}"], check=False, capture_output=True)
+    run(["/bin/launchctl", "bootstrap", domain, str(target)], check=True)
     return target
 
 
-def uninstall(runner: Runner = subprocess.run) -> bool:
-    target = plist_path()
-    runner(
-        ["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
+def uninstall(runner: Runner | None = None, label: str = LABEL) -> bool:
+    target = plist_path(label)
+    run = runner or subprocess.run
+    run(
+        ["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
         check=False,
         capture_output=True,
     )
