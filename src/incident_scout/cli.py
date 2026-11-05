@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -264,7 +264,10 @@ def _eval(args: argparse.Namespace) -> int:
             )
             print(f"   {data['case']:<32} {flags} {data['seconds']:5.0f} s", flush=True)
 
-        reports.append(evaluate(cases, judge.diagnose, model, progress))
+        label = f"{model} think={args.think}" if args.think else model
+        report = evaluate(cases, judge.diagnose, label, progress)
+        report.scores = [replace(score, model=label) for score in report.scores]
+        reports.append(report)
         judge.unload()
     print("\n" + markdown_table(reports))
     if args.out:

@@ -247,3 +247,24 @@ def test_evaluate_rescore_and_tables():
     matrix = case_matrix([again])
     assert "| database-down | CSKG |" in matrix
     assert "| redis-down | invalid |" in matrix
+
+
+def test_runtimes_without_constrained_output_get_the_schema_in_the_prompt():
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        if "format" in body:
+            return httpx.Response(501)
+        return httpx.Response(
+            200, json={"message": {"content": f"```json\n{json.dumps(ANSWER)}\n```"}}
+        )
+
+    investigator = OllamaInvestigator("new-engine", transport=httpx.MockTransport(handler))
+    assert investigator.diagnose(pack()).category == "dependency"
+    assert "format" not in calls[1]
+    assert (
+        '"scope": one of: single_shop | multiple_shops | unknown'
+        in calls[1]["messages"][0]["content"]
+    )

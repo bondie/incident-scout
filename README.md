@@ -173,7 +173,47 @@ Each diagnosis is scored on four checks, and the score is their mean:
 - **Grounded** fails when the answer names a class, method, error code or host that is not
   in the evidence pack, which catches invented details.
 
-<!-- MODEL-RESULTS -->
+### Results
+
+Seven local models ran on an Apple M1 Pro with 32 GB of RAM, in November 2026, with
+answers in Czech. Each model saw the same packs and answered once, at temperature 0, with
+thinking switched off (`gpt-oss` cannot switch it off and ran at `low`). Besides the
+twelve public cases, every model also saw **eight real incidents** from the e-commerce fleet
+the tool was built for. Those packs contain production logs and stay private; only the
+aggregate scores are published.
+
+| Model | Size | Synthetic (12) | Real incidents (8) | All (20) | p50 latency |
+|---|---:|---:|---:|---:|---:|
+| **`gemma4:12b`** | 8 GB | 0.96 | **1.00** | **0.97** | 39 s |
+| `gemma4:26b` | 18 GB | 0.96 | 0.97 | 0.96 | **20 s** |
+| `qwen3.8:27b` | 18 GB | **1.00** | 0.88 | 0.95 | 81 s |
+| `gpt-oss:20b` | 13 GB | 0.92 | 0.78 | 0.86 | 15 s |
+| `granite4.2:8b` | 5 GB | 0.90 | 0.75 | 0.84 | 31 s |
+| `qwen2.5:14b` | 9 GB | 0.94 | 0.69 | 0.84 | 54 s |
+| `nemotron-3.5-lightning:30b-a3b` | 19 GB | 0.73 | 0.69 | 0.71 | 15 s |
+
+What the numbers say:
+
+- **Real incidents separate the models; synthetic ones barely do.** Six of the seven models
+  score 0.90 or more on the synthetic cases, but only three reach 0.88 on real incidents.
+  The typical miss is a vulnerability scan (a burst of requests for `/.env` and
+  `wp-config.php` from one address) reported as an application bug, a connector failure or
+  an overloaded CPU, even when the pack shows a CPU load below 0.5.
+- **Size is not the deciding factor.** The 8 GB `gemma4:12b` matched or beat the 18-19 GB
+  models. The 30B mixture-of-experts `nemotron` is fast, but 15% of its answers were not
+  valid JSON.
+- **The pack matters as much as the model.** In the first run, the internal frontend was the
+  busiest client in the scan incidents, and even the best models named it as the attacker.
+  The keyword check cannot catch a wrong culprit described in the right words; reading the
+  answers did. The fix belonged to the evidence: client and user-agent sections now leave out
+  internal traffic, so the pack shows what normal traffic looks like.
+- **Runtimes have quirks.** One model kept generating until a timeout, so answers are now
+  capped at `max_tokens`. One runtime rejects schema-constrained output (HTTP 501), so the
+  investigator retries with the schema described in the prompt and reads the JSON leniently.
+- **Caveats.** Twenty cases with one run each means a difference of 0.05 is a single case.
+  The synthetic cases were written by the same author as the scoring rules.
+
+<!-- THINKING-RESULT -->
 
 ## Development
 
