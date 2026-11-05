@@ -48,10 +48,19 @@ class Event:
     """A state change worth telling a human about."""
 
     kind: Literal[
-        "opened", "resolved", "diagnosed", "blind", "restored", "rule_failing", "rule_recovered"
+        "opened",
+        "resolved",
+        "diagnosed",
+        "diagnosis_failed",
+        "reviewed",
+        "blind",
+        "restored",
+        "rule_failing",
+        "rule_recovered",
     ]
     severity: Severity
     title: str
     message: str
     group: str
     url: str | None = None
+    incident_id: int | None = None

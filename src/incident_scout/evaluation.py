@@ -7,7 +7,7 @@ import statistics
 import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +107,32 @@ def _case(data: dict[str, Any], default_id: str) -> Case:
         cause=tuple(tuple(group) for group in expect["cause"]),
         note=str(data.get("note", "")),
     )
+
+
+def case_document(
+    case_id: str,
+    pack: EvidencePack,
+    category: str,
+    scope: str,
+    cause: Sequence[Sequence[str]],
+    note: str = "",
+) -> dict[str, Any]:
+    """A case file for a reviewed real incident, the inverse of `load_cases`."""
+    return {
+        "id": case_id,
+        "note": note,
+        "expect": {"category": category, "scope": scope, "cause": [list(g) for g in cause]},
+        "pack": {
+            "rule": pack.rule,
+            "severity": pack.severity,
+            "summary": pack.summary,
+            "labels": dict(pack.labels),
+            "started_at": _iso(pack.started_at),
+            "window_start": _iso(pack.window_start),
+            "window_end": _iso(pack.window_end),
+            "sections": [{"name": s.name, "lines": list(s.lines)} for s in pack.sections],
+        },
+    }
 
 
 def score(case: Case, diagnosis: Diagnosis) -> Score:
@@ -218,3 +244,7 @@ def _timestamp(value: Any) -> float:
     if isinstance(value, str):
         return datetime.fromisoformat(value).timestamp()
     return float(value)
+
+
+def _iso(seconds: float) -> str:
+    return datetime.fromtimestamp(seconds, UTC).isoformat()
