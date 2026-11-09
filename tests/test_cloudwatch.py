@@ -453,6 +453,17 @@ def test_cloudwatch_and_log_timelines_in_the_evidence():
     assert sections["5xx"][1].split()[-1] == "33"
 
 
+def test_log_groups_take_incident_labels_and_are_left_out_without_them():
+    fake = FakeCloudWatch(logs={"Q": [Series({"error": "boom"}, [(NOW, 3.0)])]})
+    query = EvidenceQuery("Lambda errors", "logs_insights", "Q", log_groups=("/aws/lambda/$label",))
+    pack = run(collect(fake, [query], "r", "warning", "s", {"label": "worker"}, NOW, now=NOW))
+    assert pack.sections[0].lines == ["     3x  error=boom"]
+    assert fake.calls[0][1] == ("/aws/lambda/worker",)
+    other = run(collect(fake, [query], "r", "warning", "s", {"shop": "a"}, NOW, now=NOW))
+    assert other.sections == []
+    assert len(fake.calls) == 1
+
+
 def test_service_events_list_deployments_and_events_in_the_window():
     options: dict[str, Any] = {
         "region_name": "eu-central-1",

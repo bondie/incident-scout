@@ -151,6 +151,11 @@ rules:
 #       kind: ecs_events
 #       sources: [shop-a]
 #       query: $shop-cluster
+#     - name: Lambda errors in the window (only for incidents labelled with the function)
+#       kind: logs_insights
+#       sources: [shop-a]
+#       log_groups: ['/aws/lambda/$label']
+#       query: 'filter @message like /Invoke Error|Task timed out|Runtime exited/ | parse @message /"errorMessage":"(?<error>[^"0-9]{0,120})/ | stats count(*) as value by error | sort value desc | limit 6'
 
 # Optional: propose a ticket for the PM when an incident lasts or keeps coming back. Needs the
 # investigator. The card goes to a Teams channel; its buttons open `scout serve` on this machine.

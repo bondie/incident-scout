@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from string import Template
 from typing import Literal
@@ -31,8 +31,9 @@ class EvidenceQuery:
     two series), `logql_top` gives one total per series over the whole window, written as
     `[$window]`. `logs_insights` gives a timeline when it groups by `bin(...)` and totals
     otherwise. `ecs_events` lists deployments and service events of the ECS cluster named
-    by the query. `$label` placeholders take the incident's labels, e.g. `shop="$shop"`.
-    A query only runs for incidents of rules on its `source`.
+    by the query. `$label` placeholders take the incident's labels, e.g. `shop="$shop"`, in
+    the query and in `log_groups`; a query whose log group names a label the incident does not
+    have is left out. A query only runs for incidents of rules on its `source`.
     """
 
     name: str
@@ -104,9 +105,14 @@ async def collect(
     window_start = started_at - before
     pack = EvidencePack(rule, severity, summary, dict(labels), started_at, window_start, window_end)
     for query in queries:
+        groups = tuple(Template(group).safe_substitute(labels) for group in query.log_groups)
+        if any("$" in group for group in groups):
+            continue
         text = Template(query.query).safe_substitute(labels)
         try:
-            lines = await _section(telemetry, query, text, window_start, window_end, now)
+            lines = await _section(
+                telemetry, replace(query, log_groups=groups), text, window_start, window_end, now
+            )
         except Exception as error:
             lines = [f"(query failed: {type(error).__name__}: {str(error)[:150]})"]
         pack.sections.append(Section(query.name, lines))
