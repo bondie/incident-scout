@@ -223,6 +223,9 @@ the same problem happened, the diagnosis and the evidence, and recommends one of
 *create a ticket*, *no ticket needed*, or *already in ticket X* (only for a similar ticket of
 the same shop). It also drafts the ticket for the PM in JIRA markup: what happens and since
 when, how often, the impact on customers, the evidence and what to check first.
+A review that marks the diagnosis `wrong` replaces it in the model's input with the reviewed
+cause, and a `partial` one is put next to it, so a proposal drafted after the review does not
+repeat a cause a person has already rejected.
 
 The proposal arrives as a card in a Microsoft Teams channel, through a Workflows webhook
 ("Send webhook alerts to a channel", triggered by *anyone*, since the monitor does not sign

@@ -111,6 +111,49 @@ def test_the_brief_holds_history_diagnosis_and_evidence(tmp_path: Path):
     assert "No space left on device" in text
 
 
+def test_a_wrong_review_replaces_the_diagnosis_in_the_brief(tmp_path: Path):
+    store = Store(tmp_path / "state.db")
+    current = opened(store, 20)
+    store.save_diagnosis(current, DIAGNOSIS.to_json(), T0)
+    review: dict[str, Any] = {
+        "verdict": "wrong",
+        "cause": "Logs filled the disk.",
+        "category": "resources",
+        "scope": "single_shop",
+        "keywords": [],
+        "note": "rotation was off",
+        "model": "tiny",
+    }
+    store.save_review(current, json.dumps(review), T0)
+    incident = store.incident(current)
+    assert incident is not None
+    text = brief(incident, [], T0)
+    assert "real cause: Logs filled the disk." in text
+    assert "note: rotation was off" in text
+    assert "MySQL refuses connections." not in text
+
+
+def test_a_partial_review_comes_with_the_diagnosis(tmp_path: Path):
+    store = Store(tmp_path / "state.db")
+    current = opened(store, 20)
+    store.save_diagnosis(current, DIAGNOSIS.to_json(), T0)
+    review: dict[str, Any] = {
+        "verdict": "partial",
+        "cause": "MySQL refused connections after a full disk.",
+        "category": "resources",
+        "scope": "single_shop",
+        "keywords": [],
+        "note": None,
+    }
+    store.save_review(current, json.dumps(review), T0)
+    incident = store.incident(current)
+    assert incident is not None
+    text = brief(incident, [], T0)
+    assert "verdict on the diagnosis: partial" in text
+    assert "likely cause: MySQL refuses connections." in text
+    assert "note:" not in text
+
+
 def test_draft_asks_the_model_with_the_proposal_schema(tmp_path: Path):
     requests: list[dict[str, Any]] = []
 

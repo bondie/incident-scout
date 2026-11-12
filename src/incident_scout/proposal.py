@@ -35,7 +35,8 @@ SCHEMA: dict[str, Any] = {
 SYSTEM_PROMPT = """\
 You help an on-call developer decide whether a production incident needs a ticket for the
 project manager (PM). You get the incident, how often the same problem happened recently, the
-diagnosis and the evidence it was made from.
+diagnosis and the evidence it was made from. When a person reviewed the incident, the review
+overrides the diagnosis: build the recommendation, reason and description on the reviewed cause.
 
 Recommend one of:
 - create_ticket: the problem needs a developer's work. It lasts, keeps coming back, affects
@@ -130,7 +131,18 @@ def brief(incident: sqlite3.Row, history: Sequence[sqlite3.Row], now: datetime) 
     if len(earlier) > 12:
         lines.append(f"(+{len(earlier) - 12} more)")
     lines.append(f"total: {len(earlier) + 1} incidents including this one")
-    if incident["diagnosis"]:
+    review = json.loads(incident["review"]) if incident["review"] else None
+    if review and review["verdict"] != "correct":
+        lines += [
+            "",
+            "## Review by a person (overrides the diagnosis)",
+            f"verdict on the diagnosis: {review['verdict']}",
+            f"real cause: {review['cause']}",
+            f"category: {review['category']}, scope: {review['scope']}",
+        ]
+        if review.get("note"):
+            lines.append(f"note: {review['note']}")
+    if incident["diagnosis"] and not (review and review["verdict"] == "wrong"):
         diagnosis = Diagnosis(**json.loads(incident["diagnosis"]))
         lines += [
             "",
