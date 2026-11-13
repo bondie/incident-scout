@@ -65,7 +65,17 @@ Rules:
 - summary: one sentence on what is happening. likely_cause: the most probable cause, citing
   the decisive evidence. key_evidence: up to 4 facts copied from the pack. next_steps: up to
   3 concrete checks or fixes.
-- Write summary, likely_cause, key_evidence and next_steps in {language}.
+- Suggest blocking or rate-limiting a client address only when the evidence clearly shows a
+  bot or scanner (the user agent of a known crawler or scanner, requests probing for
+  vulnerabilities such as SQL injection payloads or paths like /wp-admin or /.env), or you
+  are certain it is a targeted attack. Heavy traffic from a normal browser user agent, a
+  logged-in customer or the shop's own frontend (user agent "node", internal 10.x addresses)
+  is normal use: never suggest blocking it; look for the cause on the shop side instead,
+  such as an upstream service rate limit (a search provider answering 429).
+- Write summary, likely_cause, key_evidence and next_steps in
+  natural, correct {language} as a native developer writes it: keep established
+  IT loanwords as they are (import, export, deploy, cache) and never coin derived
+  words such as "importace"; check spelling.
 Respond with JSON only."""
 
 

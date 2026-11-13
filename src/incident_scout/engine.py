@@ -8,7 +8,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 
 from .models import Finding, Series
-from .rules import Rule, cloudwatch, evaluate, series_key
+from .rules import Rule, cloudwatch, evaluate, rewritten, series_key
 from .sources.base import Telemetry, parse_duration
 from .tracker import CheckResult
 
@@ -143,7 +143,7 @@ def episodes(rule: Rule, series: Sequence[Series], step: int) -> list[Episode]:
     by_key: dict[str, list[tuple[float, float]]] = {}
     for item in series:
         points = [(t, v) for t, v in item.points if rule.breached(v)]
-        by_key.setdefault(series_key(rule, item.labels), []).extend(points)
+        by_key.setdefault(series_key(rule, rewritten(rule, item.labels)), []).extend(points)
     result = []
     for key, raw in by_key.items():
         points = sorted(set(raw))

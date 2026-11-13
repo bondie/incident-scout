@@ -38,8 +38,9 @@ from .investigator import CATEGORIES, SCOPES, Diagnosis, InvestigationError, Oll
 from .models import Event
 from .notify import ConsoleNotifier, DesktopNotifier, Notifier, NtfyNotifier, dispatch
 from .proposal import Proposal, draft, new_token
+from .rules import Rule
 from .sources.base import parse_duration
-from .state import Store
+from .state import ID_PREFIX, Store, short_id
 from .tracker import CheckResult, process
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
@@ -77,12 +78,12 @@ def _parser() -> argparse.ArgumentParser:
     cmd.set_defaults(handler=_history)
 
     cmd = commands.add_parser("show", help="one incident: timeline, diagnosis, review, evidence")
-    cmd.add_argument("incident", type=int, help="incident id")
+    cmd.add_argument("incident", type=_incident_id, help="incident id, e.g. SCOUT-47")
     cmd.add_argument("--pack", action="store_true", help="print the stored evidence pack")
     cmd.set_defaults(handler=_show)
 
     cmd = commands.add_parser("review", help="record whether the diagnosis was right")
-    cmd.add_argument("incident", type=int, help="incident id")
+    cmd.add_argument("incident", type=_incident_id, help="incident id, e.g. SCOUT-47")
     cmd.add_argument("--verdict", required=True, choices=VERDICTS)
     cmd.add_argument("--cause", help="the real cause (default: the diagnosis, if correct)")
     cmd.add_argument("--category", choices=CATEGORIES, help="real category (default: diagnosis)")
@@ -97,7 +98,7 @@ def _parser() -> argparse.ArgumentParser:
     cmd.set_defaults(handler=_review)
 
     cmd = commands.add_parser("export-case", help="turn a reviewed incident into an eval case")
-    cmd.add_argument("incident", type=int, help="incident id")
+    cmd.add_argument("incident", type=_incident_id, help="incident id, e.g. SCOUT-47")
     cmd.add_argument("--out", type=Path, required=True, help="case file or directory")
     cmd.set_defaults(handler=_export_case)
 
@@ -110,7 +111,9 @@ def _parser() -> argparse.ArgumentParser:
     cmd = commands.add_parser(
         "investigate", help="collect evidence for an incident and diagnose it"
     )
-    cmd.add_argument("--incident", type=int, help="incident id (see `scout status`)")
+    cmd.add_argument(
+        "--incident", type=_incident_id, help="incident id, e.g. SCOUT-47 (see `scout status`)"
+    )
     cmd.add_argument("--rule", help="rule name, for an incident from history")
     cmd.add_argument("--label", action="append", default=[], help="label=value (repeatable)")
     cmd.add_argument("--at", help="when it started, local time, e.g. 2026-11-03T13:58")
@@ -142,13 +145,18 @@ def _parser() -> argparse.ArgumentParser:
     cmd.set_defaults(handler=_notify_test)
 
     cmd = commands.add_parser("propose", help="draft a ticket proposal for the PM and send it")
-    cmd.add_argument("incident", type=int, help="incident id")
+    cmd.add_argument("incident", type=_incident_id, help="incident id, e.g. SCOUT-47")
     cmd.add_argument("--no-send", action="store_true", help="print it instead of posting to Teams")
+    cmd.add_argument(
+        "--card", action="store_true", help="print the Teams card JSON; reuses a stored proposal"
+    )
     cmd.set_defaults(handler=_propose)
 
     cmd = commands.add_parser("decide", help="approve or reject a ticket proposal")
-    cmd.add_argument("incident", type=int, help="incident id")
+    cmd.add_argument("incident", type=_incident_id, help="incident id, e.g. SCOUT-47")
     cmd.add_argument("decision", choices=sorted(server.DECISIONS))
+    cmd.add_argument("--reason", help="why, e.g. a known problem; kept with the decision")
+    cmd.add_argument("--ticket", help="the ticket that already covers it, e.g. SHOP-123")
     cmd.set_defaults(handler=_decide)
 
     cmd = commands.add_parser("serve", help="the local page behind the Teams card buttons")
@@ -260,6 +268,10 @@ def _propose_due(config: Config, store: Store, now: datetime) -> None:
         history = store.same_problem(
             incident["fingerprint"], now - timedelta(days=settings.recurring_days)
         )
+        cover = _cover(history)
+        if cover:
+            _note_cover(store, incident, cover, now)
+            continue
         if any(row["proposal"] for row in history):
             continue
         lasted = now - datetime.fromisoformat(incident["opened_at"])
@@ -272,6 +284,29 @@ def _propose_due(config: Config, store: Store, now: datetime) -> None:
             _make_proposal(config, store, incident, now, send=True)
         except Exception as error:  # a failed proposal must not break monitoring
             print(f"proposal for #{incident['id']} failed: {error}", file=sys.stderr)
+
+
+def _cover(history: Sequence[sqlite3.Row]) -> str:
+    """The ticket, or else the reason, of the newest decision on the same problem."""
+    for row in history:
+        if row["decision"] and (row["decision_ticket"] or row["decision_reason"]):
+            return str(row["decision_ticket"] or row["decision_reason"])
+    return ""
+
+
+def _note_cover(store: Store, incident: sqlite3.Row, cover: str, now: datetime) -> None:
+    if store.has_event(incident["id"], "covered"):
+        return
+    event = Event(
+        "covered",
+        "info",
+        f"⏭ {incident['rule']} #{incident['id']}",
+        f"covered by {cover}",
+        group=incident["fingerprint"],
+        incident_id=incident["id"],
+    )
+    store.record([event], now)
+    ConsoleNotifier().send(event)
 
 
 def _make_proposal(
@@ -294,18 +329,51 @@ def _make_proposal(
     )
     store.record([event], now)
     ConsoleNotifier().send(event)
+    fresh = store.incident(incident["id"]) or incident
+    if proposal.recommendation == "no_ticket":
+        server.decide(store, fresh, "reject", now, proposal.reason)
+        return proposal
+    if proposal.recommendation == "existing_ticket" and proposal.existing_ticket:
+        server.decide(store, fresh, "reject", now, proposal.reason, proposal.existing_ticket)
     if send and settings.teams_url:
-        fresh = store.incident(incident["id"]) or incident
-        card = teams.proposal_card(
-            fresh,
-            proposal,
-            len(history),
-            settings.recurring_days,
-            server.links(f"http://127.0.0.1:{settings.port}", incident["id"], token),
-            triage.investigator_config(config).language,
-        )
-        teams.post(settings.teams_url, card)
+        teams.post(settings.teams_url, _card(config, store, fresh, proposal, token, now))
     return proposal
+
+
+def _card(
+    config: Config,
+    store: Store,
+    incident: sqlite3.Row,
+    proposal: Proposal,
+    token: str,
+    now: datetime,
+) -> dict[str, Any]:
+    settings = _tickets(config)
+    history = store.same_problem(
+        incident["fingerprint"], now - timedelta(days=settings.recurring_days)
+    )
+    rule = next(
+        (r for r in config.rules if r.name == incident["rule"]), Rule(incident["rule"], "promql")
+    )
+    shop = rule.shop or json.loads(incident["labels"] or "{}").get("shop", "")
+    header = teams.Header(
+        rule.shop_title or shop.capitalize(),
+        rule.title or rule.name,
+        teams.logo(_logo(config, shop)),
+    )
+    return teams.proposal_card(
+        incident,
+        proposal,
+        header,
+        teams.scope(incident, history, now),
+        settings.recurring_days,
+        server.links(f"http://127.0.0.1:{settings.port}", incident["id"], token),
+        triage.investigator_config(config).language,
+    )
+
+
+def _logo(config: Config, shop: str) -> str | None:
+    return {name.lower(): logo for name, logo in config.logos.items()}.get(shop.lower())
 
 
 def _tickets(config: Config) -> TicketsConfig:
@@ -315,7 +383,11 @@ def _tickets(config: Config) -> TicketsConfig:
 
 
 def _incident_pack(config: Config, incident: sqlite3.Row) -> EvidencePack:
-    labels = labels_from_key(incident["fingerprint"].split("|", 1)[1])
+    labels = (
+        json.loads(incident["labels"])
+        if incident["labels"]
+        else labels_from_key(incident["fingerprint"].split("|", 1)[1])
+    )
     return asyncio.run(
         triage.gather(
             config,
@@ -464,7 +536,7 @@ def _status(args: argparse.Namespace) -> int:
     print(f"\nopen incidents: {len(incidents)}")
     for row in incidents:
         print(
-            f"  #{row['id']:<4} {row['severity']:<8} since {_local(row['opened_at'])}  "
+            f"  {short_id(row['id']):<10} {row['severity']:<8} since {_local(row['opened_at'])}  "
             f"{row['summary']}"
         )
     pending = store.pending()
@@ -482,7 +554,8 @@ def _status(args: argparse.Namespace) -> int:
         print("\nrecently resolved:")
         for row in recent:
             print(
-                f"  #{row['id']:<4} {_local(row['opened_at'])} - {_local(row['resolved_at'])}  "
+                f"  {short_id(row['id']):<10} {_local(row['opened_at'])} - "
+                f"{_local(row['resolved_at'])}  "
                 f"{row['summary']}"
             )
     return 0
@@ -500,7 +573,7 @@ def _history(args: argparse.Namespace) -> int:
         if row["proposal"]:
             notes.append(f"ticket {row['decision'] or 'proposed'}")
         print(
-            f"  #{row['id']:<4} {_local(row['opened_at'])}  {_lasted(row):>9}  "
+            f"  {short_id(row['id']):<10} {_local(row['opened_at'])}  {_lasted(row):>9}  "
             f"{row['rule']:<18} {row['summary']}  ({', '.join(notes)})"
         )
     return 0
@@ -513,7 +586,10 @@ def _show(args: argparse.Namespace) -> int:
     if incident is None:
         print(f"no incident {args.incident}", file=sys.stderr)
         return 1
-    print(f"#{incident['id']} {incident['rule']} ({incident['severity']})  {incident['summary']}")
+    print(
+        f"{short_id(incident['id'])} {incident['rule']} ({incident['severity']})  "
+        f"{incident['summary']}"
+    )
     closed = "still open"
     if incident["resolved_at"]:
         closed = f"resolved {_local(incident['resolved_at'])} ({_lasted(incident)})"
@@ -528,7 +604,12 @@ def _show(args: argparse.Namespace) -> int:
     if incident["review"]:
         _print_review(json.loads(incident["review"]))
     if incident["proposal"]:
-        _print_proposal(Proposal.from_json(incident["proposal"]), incident["decision"])
+        _print_proposal(
+            Proposal.from_json(incident["proposal"]),
+            incident["decision"],
+            incident["decision_reason"],
+            incident["decision_ticket"],
+        )
     if not incident["evidence"]:
         print("\nno evidence stored")
         return 0
@@ -625,13 +706,26 @@ def _propose(args: argparse.Namespace) -> int:
     if incident is None:
         print(f"no incident {args.incident}", file=sys.stderr)
         return 1
+    now = datetime.now(UTC)
+    if args.card and incident["proposal"]:
+        stored = Proposal.from_json(incident["proposal"])
+        _print_card(_card(config, store, incident, stored, incident["proposal_token"], now))
+        return 0
     try:
-        proposal = _make_proposal(config, store, incident, datetime.now(UTC), not args.no_send)
+        proposal = _make_proposal(config, store, incident, now, not (args.no_send or args.card))
     except InvestigationError as error:
         print(f"proposal failed: {error}", file=sys.stderr)
         return 1
+    if args.card:
+        fresh = store.incident(incident["id"]) or incident
+        _print_card(_card(config, store, fresh, proposal, fresh["proposal_token"], now))
+        return 0
     _print_proposal(proposal, None)
     return 0
+
+
+def _print_card(card: dict[str, Any]) -> None:
+    print(json.dumps(card, ensure_ascii=False, indent=2))
 
 
 def _decide(args: argparse.Namespace) -> int:
@@ -641,8 +735,8 @@ def _decide(args: argparse.Namespace) -> int:
     if incident is None or not incident["proposal"]:
         print(f"no ticket proposal for incident {args.incident}", file=sys.stderr)
         return 1
-    server.decide(store, incident, args.decision, datetime.now(UTC))
-    print(f"#{args.incident}: {server.DECISIONS[args.decision]}")
+    server.decide(store, incident, args.decision, datetime.now(UTC), args.reason, args.ticket)
+    print(f"{short_id(args.incident)}: {server.DECISIONS[args.decision]}")
     return 0
 
 
@@ -656,11 +750,20 @@ def _serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_proposal(proposal: Proposal, decision: str | None) -> None:
-    ticket = f" {proposal.existing_ticket}" if proposal.existing_ticket else ""
-    print(f"\n🎫 {proposal.recommendation}{ticket} ({proposal.priority}): {proposal.title}")
+def _print_proposal(
+    proposal: Proposal,
+    decision: str | None,
+    reason: str | None = None,
+    ticket: str | None = None,
+) -> None:
+    existing = f" {proposal.existing_ticket}" if proposal.existing_ticket else ""
+    print(f"\n🎫 {proposal.recommendation}{existing} ({proposal.priority}): {proposal.title}")
     print(f"     why: {proposal.reason}")
     print(f"decision: {decision or 'pending'}")
+    if ticket:
+        print(f"  ticket: {ticket}")
+    if reason:
+        print(f"  reason: {reason}")
     print("\n" + proposal.description)
 
 
@@ -674,6 +777,14 @@ def _print_review(review: dict[str, Any]) -> None:
         print(f"keywords: {groups}")
     if review.get("note"):
         print(f"    note: {review['note']}")
+
+
+def _incident_id(text: str) -> int:
+    """`SCOUT-47` as on a card, `#47` or `47`."""
+    number = text.strip().upper().removeprefix(ID_PREFIX).removeprefix("#")
+    if not number.isdigit():
+        raise argparse.ArgumentTypeError(f"{text!r} is not an incident id such as SCOUT-47")
+    return int(number)
 
 
 def _synonyms(group: str) -> list[str]:

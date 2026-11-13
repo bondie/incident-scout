@@ -100,6 +100,7 @@ class Config:
     quiet_hours: QuietHours | None = None
     investigator: InvestigatorConfig | None = None
     tickets: TicketsConfig | None = None
+    logos: Mapping[str, str] = field(default_factory=dict)
 
     def rule(self, name: str) -> Rule:
         for rule in self.rules:
@@ -159,6 +160,10 @@ def load_config(path: Path | None = None) -> Config:
         if "investigator" not in options:
             raise ConfigError("tickets need the investigator section, which runs the model")
         options["tickets"] = _build(TicketsConfig, raw["tickets"], "tickets")
+    if raw.get("logos"):
+        if not isinstance(raw["logos"], Mapping):
+            raise ConfigError("logos must map a shop to a png/jpg file or an https URL")
+        options["logos"] = {str(shop): str(logo) for shop, logo in raw["logos"].items()}
     named = {name: value for name, value in sources.items() if name != DEFAULT}
     return Config(source=sources[DEFAULT], rules=rules, sources=named, notify=notify, **options)
 
@@ -312,13 +317,17 @@ def _rule(item: Mapping[str, Any], variables: Mapping[str, str]) -> Rule:
         raise ConfigError(f"rules.{name}.kind must be one of {get_args(RuleKind)}")
     if data.get("severity", "warning") not in SEVERITIES:
         raise ConfigError(f"rules.{name}.severity must be one of {SEVERITIES}")
-    for key in ("query", "summary", "url"):
+    for key in ("query", "summary", "url", "title"):
         if isinstance(data.get(key), str):
             data[key] = Template(data[key]).safe_substitute(variables)
+    for key in ("shop", "shop_title"):
+        data.setdefault(key, variables.get(key, ""))
     if "key_labels" in data:
         data["key_labels"] = tuple(data["key_labels"])
     if "log_groups" in data:
         data["log_groups"] = _substituted(data["log_groups"], variables)
+    if "rewrite" in data:
+        data["rewrite"] = _rewrite(data["rewrite"], f"rules.{name}.rewrite")
     if data["kind"] != "alertmanager" and not data.get("query"):
         raise ConfigError(f"rules.{name}.query is required")
     if data["kind"] in CLOUDWATCH_KINDS:
@@ -326,6 +335,26 @@ def _rule(item: Mapping[str, Any], variables: Mapping[str, str]) -> Rule:
     if data["kind"] == "logs_insights" and not data.get("log_groups"):
         raise ConfigError(f"rules.{name}.log_groups is required for logs_insights")
     return cast(Rule, _build(Rule, data, f"rules.{name}"))
+
+
+def _rewrite(value: Any, where: str) -> dict[str, tuple[tuple[str, str], ...]]:
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"{where} must map a label to a list of [regex, replacement] pairs")
+    return {str(label): _rewrite_steps(steps, f"{where}.{label}") for label, steps in value.items()}
+
+
+def _rewrite_steps(steps: Any, where: str) -> tuple[tuple[str, str], ...]:
+    if not isinstance(steps, list) or not all(
+        isinstance(step, list) and len(step) == 2 for step in steps
+    ):
+        raise ConfigError(f"{where} must be a list of [regex, replacement] pairs")
+    pairs = tuple((str(pattern), str(replacement or "")) for pattern, replacement in steps)
+    for pattern, replacement in pairs:
+        try:
+            re.compile(pattern).sub(replacement, "")  # also checks group references
+        except (re.error, IndexError) as error:
+            raise ConfigError(f"{where}: invalid regex {pattern!r}: {error}") from error
+    return pairs
 
 
 def _substituted(values: Any, variables: Mapping[str, str]) -> tuple[str, ...]:

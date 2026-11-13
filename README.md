@@ -99,6 +99,33 @@ rules:
 | `logs_insights` | Logs Insights query over the last `since` | Name the number `value`; `filter` after `stats` keeps only the problems |
 
 `vars` defines `$name` placeholders, so a label selector shared by many rules is written once.
+
+With `key_labels`, series that share a key are **one problem**: they are merged into one
+finding whose value is their sum, `{count}` is how many series were merged, and every other
+label that differs between them becomes a list of its distinct values (five shown, then
+`+N`). `rewrite` cleans label values with `[regex, replacement]` pairs, in order, before the
+key and the summary are built, so a log rule that returns one series per record and error
+text still opens one incident per bug:
+
+```yaml
+  - name: connector-import-failed
+    kind: logs_insights
+    log_groups: ['$logs']
+    query: 'filter level = "error" | stats count(*) as value by type, code, reason'
+    key_labels: [type, reason]
+    rewrite:
+      reason:
+        - ['\s*\([^)]*\)\.?$', '']                        # trailing "(x)." / "(EB2-1.5-125-60x104)."
+        - ['\s*\[(entityType|externalCode): [^\]]*\]', '']
+        - ['(externalCode: )[^)\s]+', '\1…']
+        - ['(?:[A-Za-z]+\\\\)+([A-Za-z]+)', '\1']         # App\\Entity\\Customer -> Customer
+    summary: '$shop: KARAT {type} se nepropsal na e-shop ({count}×: {code}) – {reason}'
+```
+
+Fourteen customers whose first name is too short are then one incident,
+`KARAT customer se nepropsal na e-shop (14×: C1, C2, C3, C4, C5 +9) – First name is too short`.
+A rule with neither `key_labels` nor `rewrite` keeps every series apart. Alertmanager rules
+are not rewritten.
 `resolve_after` on a rule overrides the global one, so a failure that recurs every hour stays
 one incident instead of a notification every hour.
 
@@ -229,16 +256,41 @@ repeat a cause a person has already rejected.
 
 The proposal arrives as a card in a Microsoft Teams channel, through a Workflows webhook
 ("Send webhook alerts to a channel", triggered by *anyone*, since the monitor does not sign
-in). **Approve** and **Reject** open a small page served on your machine (`scout serve`,
-installed next to the checks by `scout install`): it records the decision and shows the
-ticket text to copy for the PM. Nothing reaches the PM without a person approving it, and
-every link carries a random token, so the buttons do nothing for anyone else in the channel.
+in). The card names the shop and the problem (`title` on the rule, the shop from the source's
+`shop_title` or `shop` var, or the incident's `shop` label), shows a status badge (*ongoing*,
+*recurs*, *growing*, *resolved*), how many records the problem hit in `recurring_days` and
+how many of them today, since when it lasts, the priority, the affected records and the likely
+cause. **Approve the ticket** and **Reject with a reason** open a small page served on your
+machine (`scout serve`, installed next to the checks by `scout install`): it records the
+decision, with a reason and the ticket that already covers the problem when you reject, and
+shows the ticket text to copy for the PM. Nothing reaches the PM without a person approving
+it, and every link carries a random token, so the buttons do nothing for anyone else in the
+channel.
+
+Only proposals that need a decision reach Teams. *No ticket needed* stays on the console and
+the page and is marked rejected with the model's reason. *Already in ticket X* posts a short
+card with only a link to the detail, and the ticket covers the next incidents of the problem.
+
+Every incident has an id such as `SCOUT-47`, in the card's footer, the page, `scout show`
+and `scout history`; every command takes it as well as the plain number.
+
+A logo per shop goes in front of the shop name: `logos: {shop-a: ~/logos/shop-a.png}`. A
+local png or jpg of at most 30 KB is embedded in the card, an `https://` URL is used as it is.
+Teams cannot load `.ico` files or `localhost` URLs, so those are left out.
 
 ```bash
 uv run scout propose 12                 # a proposal now, whatever its age; --no-send prints it
+uv run scout propose SCOUT-12 --no-send --card   # the Teams card JSON, from the stored proposal
 uv run scout decide 12 approve          # the same decision without Teams
+uv run scout decide 12 reject --ticket SHOP-123 --reason "known, fixed in the next release"
 uv run scout show 12                    # timeline, diagnosis, proposal and decision
 ```
+
+A decision with `--ticket` or `--reason` covers the problem: while it is among the incidents
+of the last `recurring_days`, a new incident of the same problem is still opened and notified,
+but instead of a new proposal it gets a *covered by SHOP-123* line in the log and timeline,
+nothing in Teams. Without a ticket or reason, any earlier proposal of the problem in that
+window blocks a new one, as before. A decision without them keeps the ones recorded earlier.
 
 ### Choosing a model
 

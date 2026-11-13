@@ -55,8 +55,19 @@ Then draft the ticket for the PM, who is not a developer:
   never a bare {code} or other {macro}.
   Say what happens and since when, how often, the impact on customers, the evidence with its
   numbers, and what a developer should check first.
+- Recommend blocking or rate-limiting a client address only when the evidence clearly shows a
+  bot or scanner (the user agent of a known crawler or scanner, requests probing for
+  vulnerabilities such as SQL injection payloads or paths like /wp-admin or /.env), or the
+  input makes it certain that it is a targeted attack. Heavy traffic from a normal browser
+  user agent, a logged-in customer or the shop's own frontend (user agent "node", internal
+  10.x addresses) is normal use: never suggest blocking it; point the developer to the cause
+  on the shop side instead, such as an upstream service rate limit (a search provider
+  answering 429).
 - reason: one or two sentences on why you recommend this.
-Use only facts from the input. Write reason, title and description in {language}.
+Use only facts from the input. Write reason, title and description in
+natural, correct {language} as a native developer writes it: keep established
+IT loanwords as they are (import, export, deploy, cache) and never coin derived
+words such as "importace"; check spelling.
 Respond with JSON only."""
 
 

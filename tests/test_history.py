@@ -179,7 +179,7 @@ def test_review_show_history_and_export_close_the_loop(
 
     assert scout(config_path, "history", "--since", "30d") == 0
     listed = capsys.readouterr().out
-    assert "#1" in listed
+    assert "SCOUT-1 " in listed
     assert "(diagnosed, wrong)" in listed
 
     assert scout(config_path, "export-case", "1", "--out", str(tmp_path)) == 0

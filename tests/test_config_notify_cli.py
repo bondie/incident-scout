@@ -82,6 +82,16 @@ def test_config_expands_env_and_vars_and_reads_claude_servers(config_path: Path)
         ("rules: [{name: a, kind: promql, query: x, colour: red}]", "unknown option"),
         ("rules: [{name: a, kind: promql, query: x}, {name: a, kind: promql, query: y}]", "unique"),
         ("source: {url: '${MISSING_VAR}'}", "MISSING_VAR is not set"),
+        (
+            r"rules: [{name: a, kind: logql, query: x, rewrite: {reason: [['(', '']]}}]",
+            r"rules\.a\.rewrite\.reason: invalid regex '\('",
+        ),
+        (
+            r"rules: [{name: a, kind: logql, query: x, rewrite: {reason: [['a', '\1']]}}]",
+            "invalid group reference",
+        ),
+        ("rules: [{name: a, kind: logql, query: x, rewrite: {reason: [a, b]}}]", "pairs"),
+        ("rules: [{name: a, kind: logql, query: x, rewrite: [a]}]", "must map a label"),
     ],
 )
 def test_config_errors_are_explicit(tmp_path: Path, snippet: str, message: str):
