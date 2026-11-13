@@ -70,7 +70,9 @@ def decide(
     )
 
 
-def handler(state_path: Path, language: str) -> type[BaseHTTPRequestHandler]:
+def handler(
+    state_path: Path, language: str, decided: Callable[[Store], None] | None = None
+) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parts = urlsplit(self.path)
@@ -111,6 +113,8 @@ def handler(state_path: Path, language: str) -> type[BaseHTTPRequestHandler]:
                 if match.group(2):
                     reason, ticket = (_field(params, name) for name in ("reason", "ticket"))
                     decide(store, incident, match.group(2), datetime.now(UTC), reason, ticket)
+                    if decided:
+                        decided(store)
                     incident = store.incident(incident["id"])
                 if incident is not None:
                     port = getattr(self.server, "server_port", 0)
@@ -140,8 +144,9 @@ def serve(
     port: int,
     host: str = "127.0.0.1",
     ready: Callable[[ThreadingHTTPServer], None] | None = None,
+    decided: Callable[[Store], None] | None = None,
 ) -> None:
-    server = ThreadingHTTPServer((host, port), handler(state_path, language))
+    server = ThreadingHTTPServer((host, port), handler(state_path, language, decided))
     if ready:
         ready(server)
     with server:

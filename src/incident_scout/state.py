@@ -88,6 +88,7 @@ def short_id(incident_id: int) -> str:
 
 class Store:
     def __init__(self, path: Path) -> None:
+        self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
