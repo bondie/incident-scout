@@ -142,6 +142,7 @@ rules:
     kind: logql
     query: 'failed'
     key_labels: [type, reason]
+    record_labels: [code]
     rewrite:
       reason:
         - ['\s*\([^)]*\)\.?$', '']
@@ -214,3 +215,14 @@ def test_backtests_group_rewritten_series_like_checks():
         step=60,
     )
     assert [(e.key, e.points) for e in found] == [("reason=short", 2)]
+
+
+def test_thresholds_apply_to_each_series_before_merging():
+    rule = Rule(
+        "r", "logql", query="q", key_labels=("type",), above=5, summary="{count} {code} {value:g}"
+    )
+    telemetry = FakeTelemetry(
+        logs={"q": [series(9, type="t", code="a"), series(3, type="t", code="b")]}
+    )
+    (finding,) = run(evaluate(rule, telemetry))
+    assert (finding.value, finding.summary) == (9, "1 a 9")

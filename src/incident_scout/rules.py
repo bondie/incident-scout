@@ -29,8 +29,10 @@ class Rule:
     CloudWatch metrics. `resolve_after` overrides the global number of clean checks before an
     incident is resolved, so a problem that recurs every hour stays one incident.
     `rewrite` maps a label to [regex, replacement] pairs applied before the key is computed;
-    series that then share a key are merged into one finding. `title` names the problem on
-    ticket cards; `shop` and `shop_title` default to the vars of the rule's source.
+    series that then share a key are merged into one finding. `record_labels` name one record
+    such a problem hit (a customer code), so ticket cards count records instead of incidents.
+    `title` names the problem on ticket cards; `shop` and `shop_title` default to the vars of
+    the rule's source.
     """
 
     name: str
@@ -49,6 +51,7 @@ class Rule:
     below: float | None = None
     resolve_after: int | None = None
     rewrite: Rewrite = field(default_factory=dict)
+    record_labels: tuple[str, ...] = ()
     title: str = ""
     shop: str = ""
     shop_title: str = ""
@@ -141,15 +144,7 @@ def _series_finding(rule: Rule, group: Sequence[Series]) -> Finding:
 
 
 def _member(rule: Rule, series: Series) -> str:
-    """What tells merged series apart: the values of the labels outside the key."""
-    if not rule.key_labels:
-        return ""
-    outside = (
-        value
-        for name, value in series.labels.items()
-        if name not in rule.key_labels and name != "__name__"
-    )
-    return " / ".join(outside)
+    return " / ".join(series.labels[name] for name in rule.record_labels if name in series.labels)
 
 
 def _names(group: Sequence[Series]) -> list[str]:

@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from incident_scout import cli, triage
-from incident_scout.config import load_config
+from incident_scout import cli, server, teams, triage
+from incident_scout.config import Config, InvestigatorConfig, TicketsConfig, load_config
 from incident_scout.evaluation import load_cases, score
 from incident_scout.evidence import EvidencePack, Section
 from incident_scout.investigator import Diagnosis
 from incident_scout.models import Event, Finding
+from incident_scout.proposal import Proposal
 from incident_scout.rules import Rule
-from incident_scout.state import Store
+from incident_scout.state import Store, iso
 from incident_scout.tracker import CheckResult, process
 
 from .conftest import T0, minutes
@@ -62,10 +64,35 @@ def test_old_databases_gain_the_new_columns(tmp_path: Path):
     )
     db.commit()
     db.close()
-    row = Store(path).incident(1)
+    store = Store(path)
+    row = store.incident(1)
     assert row is not None
     assert row["summary"] == "old"
     assert (row["diagnosis"], row["evidence"], row["review"]) == (None, None, None)
+    added = ("members", "labels", "decision_reason", "decision_ticket")
+    assert [row[column] for column in added] == [None] * 4
+
+    now = datetime(2026, 11, 2, tzinfo=UTC)
+    reach = teams.scope(row, [row], now, records=True)
+    assert (reach.count, reach.members, reach.since) == (1, (), "2026-11-01")
+    config = Config(
+        source={},
+        rules=[],
+        state_path=path,
+        investigator=InvestigatorConfig(model="tiny"),
+        tickets=TicketsConfig(),
+    )
+    proposal = Proposal("create_ticket", "", "Disk fills up.", "Disk full", "high", "h3. Disk")
+    store.save_proposal(1, proposal.to_json(), "tok", now)
+    row = store.incident(1)
+    assert row is not None
+    card = cli._card(config, store, row, proposal, "tok", now)
+    assert card["attachments"][0]["content"]["body"][-1]["text"] == "SCOUT-1 · disk"
+    assert "SCOUT-1 · disk" in server.page(row, "English", "http://127.0.0.1:1")
+    store.touch(1, Finding("disk", "shop=a", "warning", "new", 1.0, members=("C1",)), now)
+    touched = store.incident(1)
+    assert touched is not None
+    assert json.loads(touched["members"]) == {"C1": iso(now)}
 
 
 def test_the_timeline_holds_the_incident_and_blindness_while_it_was_open(store: Store):

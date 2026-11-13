@@ -9,7 +9,7 @@ import re
 import sqlite3
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,10 +22,14 @@ from .rules import capped
 from .state import iso, short_id
 
 GROWTH_WINDOW = timedelta(hours=3)
-LOGO_MAX_BYTES = 30 * 1024
+LOGO_MAX_BYTES = 18 * 1024
+CARD_MAX_BYTES = 27 * 1024  # Teams refuses a card of about 28 KB
 LOGO_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 PRIORITY_COLOURS = {"medium": "Warning", "high": "Attention", "critical": "Attention"}
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ])")
+_SENTENCE_END = re.compile(
+    r"(?<=[.!?])(?<!\bnapř\.)(?<!\btzv\.)(?<!\bč\.)(?<!\bresp\.)(?<!\be\.g\.)(?<!\bi\.e\.)"
+    r"\s+(?=[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ])"
+)
 
 LABELS: dict[str, dict[str, str]] = {
     "English": {
@@ -129,7 +133,7 @@ class Scope:
     new: int
     members: tuple[str, ...]
     incidents: int
-    first_seen: str | None = None
+    since: str
 
     @property
     def recurs(self) -> bool:
@@ -144,19 +148,28 @@ def labels(language: str) -> dict[str, str]:
     return LABELS.get(language, LABELS["English"])
 
 
-def scope(incident: sqlite3.Row, history: Sequence[sqlite3.Row], now: datetime) -> Scope:
+def scope(
+    incident: sqlite3.Row, history: Sequence[sqlite3.Row], now: datetime, records: bool = False
+) -> Scope:
+    """Records only for rules that name them; any other problem counts its incidents."""
     rows = list({row["id"]: row for row in (*history, incident)}.values())
+    opened = [row["opened_at"] for row in rows]
+    seen = _first_seen(rows) if records else {}
+    if not seen:
+        return Scope(len(rows), _today(opened, now), 0, (), len(rows), incident["opened_at"])
+    members = tuple(sorted(seen, key=seen.__getitem__))
+    start, recent = seen[members[0]], iso(now - GROWTH_WINDOW)
+    new = sum(1 for first in seen.values() if first > start and first >= recent)
+    since = min(start, *opened)
+    return Scope(len(seen), _today(list(seen.values()), now), new, members, len(rows), since)
+
+
+def _first_seen(rows: Sequence[sqlite3.Row]) -> dict[str, str]:
     seen: dict[str, str] = {}
     for row in rows:
         for member, first in json.loads(row["members"] or "{}").items():
             seen[member] = min(first, seen.get(member, first))
-    if not seen:
-        opened = [row["opened_at"] for row in rows]
-        return Scope(len(rows), _today(opened, now), 0, (), len(rows))
-    members = tuple(sorted(seen, key=seen.__getitem__))
-    start, recent = seen[members[0]], iso(now - GROWTH_WINDOW)
-    new = sum(1 for first in seen.values() if first > start and first >= recent)
-    return Scope(len(seen), _today(list(seen.values()), now), new, members, len(rows), start)
+    return seen
 
 
 def logo(value: str | None) -> str | None:
@@ -174,7 +187,7 @@ def logo(value: str | None) -> str | None:
         return None
     data = path.read_bytes()
     if len(data) > LOGO_MAX_BYTES:
-        print(f"logo {value} skipped: {len(data) // 1024} KB, at most 30 KB fit", file=sys.stderr)
+        print(f"logo {value} skipped: {len(data) // 1024} KB, at most 18 KB fit", file=sys.stderr)
         return None
     return f"data:{kind};base64,{base64.b64encode(data).decode()}"
 
@@ -202,7 +215,7 @@ def proposal_card(
         *parts,
         {"type": "TextBlock", "text": footer, "size": "Small", "isSubtle": True, "wrap": True},
     ]
-    return {
+    card = {
         "type": "message",
         "attachments": [
             {
@@ -218,6 +231,11 @@ def proposal_card(
             }
         ],
     }
+    if header.logo and card_bytes(card) > CARD_MAX_BYTES:
+        print(f"{ref}: logo left out, the card would exceed what Teams accepts", file=sys.stderr)
+        plain = replace(header, logo=None)
+        return proposal_card(incident, proposal, plain, reach, days, links, language)
+    return card
 
 
 def _full(
@@ -292,6 +310,11 @@ def _covered(
         {"type": "TextBlock", "text": _sentence(proposal.reason), "size": "Small", "wrap": True},
         {"type": "ActionSet", "actions": [detail]},
     ]
+
+
+def card_bytes(card: Mapping[str, Any]) -> int:
+    """The size of the card as `post` sends it."""
+    return len(json.dumps(card, ensure_ascii=False, separators=(",", ":")).encode())
 
 
 def post(
@@ -371,7 +394,7 @@ def _numbers(
     extent = [count, _small(window)]
     if reach.growing:
         extent.append(_small(text["growing"].format(new=reach.new)))
-    opened = datetime.fromisoformat(reach.first_seen or incident["opened_at"]).astimezone()
+    opened = datetime.fromisoformat(reach.since).astimezone()
     last = "resolved_at" if incident["resolved_at"] else "last_seen"
     ended = datetime.fromisoformat(incident[last]).astimezone()
     duration = [
