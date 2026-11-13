@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 import pytest
 
-from incident_scout import cli, launchd, server, teams, triage
+from incident_scout import cli, launchd, server, status, teams, triage
 from incident_scout.config import ConfigError, load_config
 from incident_scout.investigator import InvestigationError, OllamaInvestigator
 from incident_scout.models import Event, Finding
@@ -368,7 +368,7 @@ def test_serve_and_install_follow_the_tickets_config(
     config_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
     served: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(server, "serve", lambda *args: served.append(args))
+    monkeypatch.setattr(server, "serve", lambda *args, **_options: served.append(args))
     assert scout(config_path, "serve") == 0
     assert served[0][1:] == ("Czech", 8766)
 
@@ -467,3 +467,30 @@ def test_a_rejection_without_reason_or_ticket_still_blocks_a_new_proposal(
     assert calls.drafts == []
     assert [event.kind for event in pushed] == ["opened", "diagnosed"]
     assert not store.has_event(incident["id"], "covered")
+
+
+def test_check_and_decisions_keep_a_status_file_for_a_viewer(
+    config_path: Path, calls: Calls, capsys: pytest.CaptureFixture[str]
+):
+    store = Store(load_config(config_path).state_path)
+    incident_id = opened(store, 5)
+    assert scout(config_path, "propose", str(incident_id), "--no-send") == 0
+    capsys.readouterr()
+
+    assert scout(config_path, "status", "--json") == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert [row["id"] for row in shown["open"]] == [f"SCOUT-{incident_id}"]
+    proposal = shown["proposals"][0]["proposal"]
+    assert proposal["title"] == "Shop A: disk runs full"
+    assert proposal["page"].startswith(f"http://127.0.0.1:8766/incidents/{incident_id}?t=")
+
+    assert scout(config_path, "decide", str(incident_id), "reject") == 0
+    written = json.loads((config_path.parent / "status.json").read_text(encoding="utf-8"))
+    assert written["proposals"] == []
+    assert written["open"][0]["proposal"]["decision"] == "rejected"
+    assert written["health"]["blind_since"] is None
+
+
+def test_a_rule_fanned_out_over_sources_names_its_project():
+    assert status.project("aws-5xx@shop-a") == "shop-a"
+    assert status.project("http-5xx") is None

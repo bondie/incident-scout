@@ -174,6 +174,11 @@ window on every check, so keep log rules few and windows short.
 - **No storms.** More events than `max_per_run` in one check collapse into a single summary.
 - **Read-only.** incident-scout only queries telemetry. State, history and evidence live in
   one SQLite file (`~/.local/share/incident-scout/state.db`).
+- **A file for viewers.** Every check and decision rewrites `status.json` next to the
+  database: health, failing rules, open and pending incidents, undecided ticket proposals
+  with their decision page, and the last resolved ones. A desktop viewer reads it instead of
+  the database; `scout status --json` prints the same. It holds the proposals' tokens, so
+  only its owner can read it.
 
 ## Backtesting
 

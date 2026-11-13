@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from . import launchd, server, teams, triage
+from . import launchd, server, status, teams, triage
 from .config import (
     Config,
     ConfigError,
@@ -70,6 +70,7 @@ def _parser() -> argparse.ArgumentParser:
     cmd.set_defaults(handler=_check)
 
     cmd = commands.add_parser("status", help="open incidents, pending findings and health")
+    cmd.add_argument("--json", action="store_true", help="what status.json holds, for a viewer")
     cmd.set_defaults(handler=_status)
 
     cmd = commands.add_parser("history", help="incidents of the last days")
@@ -208,6 +209,7 @@ def _check(args: argparse.Namespace) -> int:
     if config.tickets is not None:
         _propose_due(config, store, now)
     open_count = len(store.open_incidents())
+    status.write(store, now, _port(config))
     print(
         f"{now.astimezone():%Y-%m-%d %H:%M:%S} check: {len(result.findings)} findings, "
         f"{open_count} open, {len(events)} events, {len(result.errors)} rule errors",
@@ -532,9 +534,16 @@ def _run(config: Config) -> CheckResult:
         return CheckResult([], names, dict.fromkeys(names, "timed out"))
 
 
+def _port(config: Config) -> int | None:
+    return config.tickets.port if config.tickets is not None else None
+
+
 def _status(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     store = Store(config.state_path)
+    if args.json:
+        print(json.dumps(status.snapshot(store, datetime.now(UTC), _port(config)), indent=1))
+        return 0
     health = store.health()
     print(f"last run {_local(health['last_run'])}, last success {_local(health['last_ok'])}")
     if health["blind_since"]:
@@ -749,7 +758,9 @@ def _decide(args: argparse.Namespace) -> int:
     if incident is None or not incident["proposal"]:
         print(f"no ticket proposal for incident {args.incident}", file=sys.stderr)
         return 1
-    server.decide(store, incident, args.decision, datetime.now(UTC), args.reason, args.ticket)
+    now = datetime.now(UTC)
+    server.decide(store, incident, args.decision, now, args.reason, args.ticket)
+    status.write(store, now, _port(config))
     print(f"{short_id(args.incident)}: {server.DECISIONS[args.decision]}")
     return 0
 
@@ -760,7 +771,12 @@ def _serve(args: argparse.Namespace) -> int:
     port = args.port or settings.port
     language = triage.investigator_config(config).language
     print(f"decision page on http://127.0.0.1:{port}", flush=True)
-    server.serve(config.state_path, language, port)
+    server.serve(
+        config.state_path,
+        language,
+        port,
+        decided=lambda store: status.write(store, datetime.now(UTC), port),
+    )
     return 0
 
 
