@@ -146,9 +146,16 @@ def _parser() -> argparse.ArgumentParser:
 
     cmd = commands.add_parser("propose", help="draft a ticket proposal for the PM and send it")
     cmd.add_argument("incident", type=_incident_id, help="incident id, e.g. SCOUT-47")
-    cmd.add_argument("--no-send", action="store_true", help="print it instead of posting to Teams")
     cmd.add_argument(
-        "--card", action="store_true", help="print the Teams card JSON; reuses a stored proposal"
+        "--no-send",
+        action="store_true",
+        help="print it instead of posting to Teams; it is still stored, and a proposal that "
+        "needs no ticket or names an existing one is decided at once",
+    )
+    cmd.add_argument(
+        "--card",
+        action="store_true",
+        help="only print the Teams card JSON of the stored proposal; changes and sends nothing",
     )
     cmd.set_defaults(handler=_propose)
 
@@ -365,7 +372,7 @@ def _card(
         incident,
         proposal,
         header,
-        teams.scope(incident, history, now),
+        teams.scope(incident, history, now, records=bool(rule.record_labels)),
         settings.recurring_days,
         server.links(f"http://127.0.0.1:{settings.port}", incident["id"], token),
         triage.investigator_config(config).language,
@@ -707,25 +714,32 @@ def _propose(args: argparse.Namespace) -> int:
         print(f"no incident {args.incident}", file=sys.stderr)
         return 1
     now = datetime.now(UTC)
-    if args.card and incident["proposal"]:
-        stored = Proposal.from_json(incident["proposal"])
-        _print_card(_card(config, store, incident, stored, incident["proposal_token"], now))
-        return 0
+    if args.card:
+        return _preview(config, store, incident, now)
     try:
-        proposal = _make_proposal(config, store, incident, now, not (args.no_send or args.card))
+        proposal = _make_proposal(config, store, incident, now, not args.no_send)
     except InvestigationError as error:
         print(f"proposal failed: {error}", file=sys.stderr)
         return 1
-    if args.card:
-        fresh = store.incident(incident["id"]) or incident
-        _print_card(_card(config, store, fresh, proposal, fresh["proposal_token"], now))
-        return 0
-    _print_proposal(proposal, None)
+    stored = store.incident(incident["id"]) or incident
+    _print_proposal(
+        proposal, stored["decision"], stored["decision_reason"], stored["decision_ticket"]
+    )
     return 0
 
 
-def _print_card(card: dict[str, Any]) -> None:
+def _preview(config: Config, store: Store, incident: sqlite3.Row, now: datetime) -> int:
+    if not incident["proposal"]:
+        ref = short_id(incident["id"])
+        print(
+            f"{ref} has no proposal yet; `scout propose {ref} --no-send` drafts one",
+            file=sys.stderr,
+        )
+        return 1
+    proposal = Proposal.from_json(incident["proposal"])
+    card = _card(config, store, incident, proposal, incident["proposal_token"], now)
     print(json.dumps(card, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _decide(args: argparse.Namespace) -> int:

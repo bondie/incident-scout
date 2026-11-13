@@ -113,6 +113,7 @@ text still opens one incident per bug:
     log_groups: ['$logs']
     query: 'filter level = "error" | stats count(*) as value by type, code, reason'
     key_labels: [type, reason]
+    record_labels: [code]                                  # one record: a customer
     rewrite:
       reason:
         - ['\s*\([^)]*\)\.?$', '']                        # trailing "(x)." / "(EB2-1.5-125-60x104)."
@@ -125,7 +126,9 @@ text still opens one incident per bug:
 Fourteen customers whose first name is too short are then one incident,
 `KARAT customer se nepropsal na e-shop (14×: C1, C2, C3, C4, C5 +9) – First name is too short`.
 A rule with neither `key_labels` nor `rewrite` keeps every series apart. Alertmanager rules
-are not rewritten.
+are not rewritten. `record_labels` name what one merged series stands for, here a customer:
+ticket cards then count the distinct records the problem hit. Without them, as for metric
+rules whose other labels are only an instance or a job, cards count incidents.
 `resolve_after` on a rule overrides the global one, so a failure that recurs every hour stays
 one incident instead of a notification every hour.
 
@@ -258,9 +261,9 @@ The proposal arrives as a card in a Microsoft Teams channel, through a Workflows
 ("Send webhook alerts to a channel", triggered by *anyone*, since the monitor does not sign
 in). The card names the shop and the problem (`title` on the rule, the shop from the source's
 `shop_title` or `shop` var, or the incident's `shop` label), shows a status badge (*ongoing*,
-*recurs*, *growing*, *resolved*), how many records the problem hit in `recurring_days` and
-how many of them today, since when it lasts, the priority, the affected records and the likely
-cause. **Approve the ticket** and **Reject with a reason** open a small page served on your
+*recurs*, *growing*, *resolved*), how many records (with `record_labels`) or incidents the
+problem had in `recurring_days` and how many of them today, since when it lasts, the priority,
+the affected records and the likely cause. **Approve the ticket** and **Reject with a reason** open a small page served on your
 machine (`scout serve`, installed next to the checks by `scout install`): it records the
 decision, with a reason and the ticket that already covers the problem when you reject, and
 shows the ticket text to copy for the PM. Nothing reaches the PM without a person approving
@@ -275,16 +278,22 @@ Every incident has an id such as `SCOUT-47`, in the card's footer, the page, `sc
 and `scout history`; every command takes it as well as the plain number.
 
 A logo per shop goes in front of the shop name: `logos: {shop-a: ~/logos/shop-a.png}`. A
-local png or jpg of at most 30 KB is embedded in the card, an `https://` URL is used as it is.
+local png or jpg of at most 18 KB is embedded in the card, an `https://` URL is used as it is.
+Embedding makes a file a third bigger and Teams refuses a card of about 28 KB, so a card that
+would pass 27 KB goes out without its logo, with a warning in the log.
 Teams cannot load `.ico` files or `localhost` URLs, so those are left out.
 
 ```bash
 uv run scout propose 12                 # a proposal now, whatever its age; --no-send prints it
-uv run scout propose SCOUT-12 --no-send --card   # the Teams card JSON, from the stored proposal
+uv run scout propose SCOUT-12 --card    # preview the Teams card of the stored proposal
 uv run scout decide 12 approve          # the same decision without Teams
 uv run scout decide 12 reject --ticket SHOP-123 --reason "known, fixed in the next release"
 uv run scout show 12                    # timeline, diagnosis, proposal and decision
 ```
+
+`--no-send` still stores the proposal, and one that needs no ticket or names an existing one
+is decided at once, as in a check. `--card` only prints the card of the stored proposal: it
+calls no model, stores nothing and sends nothing.
 
 A decision with `--ticket` or `--reason` covers the problem: while it is among the incidents
 of the last `recurring_days`, a new incident of the same problem is still opened and notified,

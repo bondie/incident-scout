@@ -322,8 +322,9 @@ def _rule(item: Mapping[str, Any], variables: Mapping[str, str]) -> Rule:
             data[key] = Template(data[key]).safe_substitute(variables)
     for key in ("shop", "shop_title"):
         data.setdefault(key, variables.get(key, ""))
-    if "key_labels" in data:
-        data["key_labels"] = tuple(data["key_labels"])
+    for key in ("key_labels", "record_labels"):
+        if key in data:
+            data[key] = tuple(data[key])
     if "log_groups" in data:
         data["log_groups"] = _substituted(data["log_groups"], variables)
     if "rewrite" in data:

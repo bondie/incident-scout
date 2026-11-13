@@ -26,6 +26,7 @@ from .state import Store, short_id
 from .teams import labels
 
 _ROUTE = re.compile(r"^/incidents/(\d+)(?:/(approve|reject))?$")
+MAX_FORM_BYTES = 16 * 1024
 DECISIONS: dict[str, Literal["approved", "rejected"]] = {
     "approve": "approved",
     "reject": "rejected",
@@ -76,8 +77,19 @@ def handler(state_path: Path, language: str) -> type[BaseHTTPRequestHandler]:
             self._answer(parts.path, parse_qs(parts.query))
 
         def do_POST(self) -> None:
-            length = int(self.headers.get("Content-Length") or 0)
-            form = parse_qs(self.rfile.read(length).decode())
+            length = self.headers.get("Content-Length") or "0"
+            if not (length.isascii() and length.isdigit()):
+                self._reply(HTTPStatus.BAD_REQUEST, "<p>Bad request</p>")
+                return
+            if int(length) > MAX_FORM_BYTES:
+                self._reply(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "<p>Too large</p>")
+                return
+            try:
+                body = self.rfile.read(int(length)).decode()
+                form = parse_qs(body, keep_blank_values=True, strict_parsing=True, errors="strict")
+            except ValueError:  # also a body or escape that is not UTF-8
+                self._reply(HTTPStatus.BAD_REQUEST, "<p>Bad request</p>")
+                return
             self._answer(urlsplit(self.path).path, form)
 
         def _answer(self, path: str, params: dict[str, list[str]]) -> None:
@@ -92,7 +104,8 @@ def handler(state_path: Path, language: str) -> type[BaseHTTPRequestHandler]:
                 if incident is None or not incident["proposal"]:
                     self._reply(HTTPStatus.NOT_FOUND, "<p>No such proposal</p>")
                     return
-                if not hmac.compare_digest(token, incident["proposal_token"] or ""):
+                expected = (incident["proposal_token"] or "").encode()
+                if not hmac.compare_digest(token.encode(), expected):
                     self._reply(HTTPStatus.FORBIDDEN, "<p>Invalid link</p>")
                     return
                 if match.group(2):

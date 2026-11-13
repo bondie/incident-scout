@@ -237,7 +237,7 @@ class Store:
                     first_seen or iso(now),
                     iso(now),
                     json.dumps(finding.labels, ensure_ascii=False),
-                    _members({}, finding, now),
+                    _members({}, finding, first_seen or iso(now)),
                 ),
             )
             self.db.execute("DELETE FROM pending WHERE fingerprint = ?", (finding.fingerprint,))
@@ -256,7 +256,7 @@ class Store:
                     iso(now),
                     finding.value,
                     finding.summary,
-                    _members(known, finding, now),
+                    _members(known, finding, iso(now)),
                     incident_id,
                 ),
             )
@@ -354,7 +354,7 @@ class Store:
         return self.db.execute("SELECT * FROM rule_health ORDER BY rule").fetchall()
 
 
-def _members(known: dict[str, str], finding: Finding, now: datetime) -> str:
+def _members(known: dict[str, str], finding: Finding, seen_at: str) -> str:
     """Every record the problem has hit, with when it was first seen."""
-    seen = dict.fromkeys((m for m in finding.members if m not in known), iso(now))
+    seen = dict.fromkeys((m for m in finding.members if m not in known), seen_at)
     return json.dumps({**known, **seen}, ensure_ascii=False)

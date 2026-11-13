@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import json
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -15,7 +17,7 @@ from incident_scout.config import Config, load_config
 from incident_scout.models import Finding
 from incident_scout.proposal import Proposal
 from incident_scout.rules import Rule, evaluate
-from incident_scout.state import Store
+from incident_scout.state import Store, iso
 
 from .conftest import T0, FakeTelemetry, series
 from .test_cli_investigator import DIAGNOSIS
@@ -31,8 +33,9 @@ investigator: {{model: tiny, language: Czech}}
 tickets: {{teams_url: "https://teams.example/hook", recurring_days: 7, port: 8766}}
 {logos}
 rules:
-  - {{name: import, kind: logql, query: 'failed', key_labels: [type],
+  - {{name: import, kind: logql, query: 'failed', key_labels: [type], record_labels: [code],
       title: Import zákazníků z KARATu}}
+  - {{name: down, kind: promql, query: 'up == 0', key_labels: [shop], title: Shop down}}
 """
 IMPORT = Finding("import", "type=customer", "warning", "3x import failed", 3.0)
 
@@ -86,10 +89,10 @@ def test_the_card_header_names_the_shop_and_problem_with_a_logo(
     assert "isSubtle" not in names["items"][0]
     assert content(card)["fallbackText"] == "🎫 SCOUT-1 · Shop A: disk runs full"
 
-    logo.write_bytes(b"x" * 31 * 1024)
+    logo.write_bytes(b"x" * 19 * 1024)
     big = card_for(config, store, 1)
     assert len(content(big)["body"][0]["columns"]) == 2
-    assert "at most 30 KB" in capsys.readouterr().err
+    assert "at most 18 KB" in capsys.readouterr().err
 
     titled = card_config(tmp_path, title="Kovian.sk")
     plain = card_for(titled, store, 1)
@@ -312,3 +315,141 @@ def test_labels_with_commas_reach_the_evidence_intact(
     with pytest.raises(RuntimeError, match="stop"):
         cli._incident_pack(config, incident)
     assert seen == [{"type": "customer", "reason": reason}]
+
+
+def test_a_metric_problem_counts_its_incidents_and_dates_the_current_one(tmp_path: Path):
+    config = card_config(tmp_path)
+    store = Store(config.state_path)
+    telemetry = FakeTelemetry(metrics={"up == 0": [series(0, shop="a", instance="i1", job="n")]})
+    (finding,) = asyncio.run(evaluate(config.rule("down"), telemetry))
+    assert finding.members == ()
+    for start in (T0 - timedelta(days=2), T0 - timedelta(days=1), T0 - timedelta(minutes=10)):
+        earlier = store.open(finding, start)
+        store.resolve(earlier, start + timedelta(minutes=5))
+    current = T0 + timedelta(minutes=20)
+    card = card_for(config, store, store.open(finding, current))
+    shown = texts(content(card)["body"])
+    assert "4 výskyty" in shown
+    assert "za 7 dní, 2 dnes" in shown
+    assert f"od {teams._when(current.astimezone())}" in shown
+    assert not any(text.startswith("Zasažené") for text in shown)
+
+
+def test_a_metric_problem_ignores_members_stored_by_older_versions(tmp_path: Path):
+    config = card_config(tmp_path)
+    store = Store(config.state_path)
+    telemetry = FakeTelemetry(metrics={"up == 0": [series(0, shop="a", instance="i1", job="n")]})
+    (finding,) = asyncio.run(evaluate(config.rule("down"), telemetry))
+    earlier = store.open(finding, T0 - timedelta(days=1))
+    store.resolve(earlier, T0 - timedelta(days=1) + timedelta(minutes=5))
+    current = store.open(finding, T0 + timedelta(minutes=20))
+    legacy = json.dumps({"i1 / n": iso(T0 - timedelta(days=1))})
+    with store.db:
+        store.db.execute("UPDATE incidents SET members = ?", (legacy,))
+    shown = texts(content(card_for(config, store, current))["body"])
+    assert "2 výskyty" in shown
+    assert not any(text.startswith("Zasažené") for text in shown)
+
+
+def test_records_date_from_the_first_check_and_from_incidents_without_records(tmp_path: Path):
+    config = card_config(tmp_path)
+    store = Store(config.state_path)
+    upgraded = store.open(IMPORT, T0 - timedelta(hours=2))
+    with store.db:
+        store.db.execute("UPDATE incidents SET members = NULL WHERE id = ?", (upgraded,))
+    store.resolve(upgraded, T0 - timedelta(hours=1))
+    waited = Finding(**{**IMPORT.__dict__, "members": ("C1",)})
+    incident_id = store.open(waited, T0 + timedelta(minutes=10), first_seen=iso(T0))
+    incident = store.incident(incident_id)
+    assert incident is not None
+    assert json.loads(incident["members"]) == {"C1": "2026-11-03T12:00:00+00:00"}
+    shown = texts(content(card_for(config, store, incident_id))["body"])
+    assert "1 záznam" in shown
+    assert f"od {teams._when((T0 - timedelta(hours=2)).astimezone())}" in shown
+
+
+def test_a_card_too_big_for_teams_goes_without_the_logo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    logo = tmp_path / "kovian.png"
+    logo.write_bytes(b"x" * 2048)
+    config = card_config(tmp_path, logos=f"logos: {{kovian: {logo}}}")
+    store = Store(config.state_path)
+    incident_id = store.open(IMPORT, T0)
+    with_logo = card_for(config, store, incident_id)
+    assert len(content(with_logo)["body"][0]["columns"]) == 3
+    assert teams.card_bytes(with_logo) < teams.CARD_MAX_BYTES
+    monkeypatch.setattr(teams, "CARD_MAX_BYTES", teams.card_bytes(with_logo) - 1)
+    plain = card_for(config, store, incident_id)
+    assert len(content(plain)["body"][0]["columns"]) == 2
+    assert "SCOUT-1: logo left out" in capsys.readouterr().err
+
+
+def test_propose_prints_an_automatic_decision_and_the_preview_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    config = card_config(tmp_path)
+    path = tmp_path / "config.yaml"
+    store = Store(config.state_path)
+    incident_id = store.open(IMPORT, T0)
+    monkeypatch.setattr(teams, "post", lambda *_: pytest.fail("nothing may be sent"))
+    monkeypatch.setattr(cli, "draft", lambda *_: pytest.fail("the preview needs no model"))
+    assert scout(path, "propose", "SCOUT-1", "--card") == 1
+    assert "SCOUT-1 has no proposal yet" in capsys.readouterr().err
+    incident = store.incident(incident_id)
+    assert incident is not None
+    assert incident["proposal"] is None
+
+    quiet = answer(recommendation="no_ticket", reason="A one-off spike.")
+    monkeypatch.setattr(cli, "draft", lambda *_: quiet)
+    assert scout(path, "propose", "SCOUT-1", "--no-send") == 0
+    assert "decision: rejected\n  reason: A one-off spike.\n" in capsys.readouterr().out
+
+
+def test_the_impact_sentence_does_not_end_at_an_abbreviation():
+    text = "Import padá pro objednávku č. A12, např. Kovian, resp. Haspl. Druhá věta."
+    assert teams._sentence(text) == "Import padá pro objednávku č. A12, např. Kovian, resp. Haspl."
+    assert teams._sentence("Jde o tzv. Ghost produkt. Další.") == "Jde o tzv. Ghost produkt."
+    assert teams._sentence("Fails. Then recovers.") == "Fails."
+
+
+def raw_post(base: str, path: str, body: bytes, length: str | None = None) -> int:
+    url = urlsplit(base)
+    connection = http.client.HTTPConnection(url.hostname or "", url.port, timeout=5)
+    connection.putrequest("POST", path)
+    connection.putheader("Content-Type", "application/x-www-form-urlencoded")
+    connection.putheader("Content-Length", str(len(body)) if length is None else length)
+    connection.endheaders(body)
+    status = connection.getresponse().status
+    connection.close()
+    return status
+
+
+def test_the_decision_page_refuses_malformed_or_oversized_forms(page_server: tuple[str, Store]):
+    base, store = page_server
+    incident_id = store.open(IMPORT, T0)
+    store.save_proposal(incident_id, PROPOSAL.to_json(), "secret-token", T0)
+    path = f"/incidents/{incident_id}/reject"
+    assert raw_post(base, path, b"", length="abc") == 400
+    assert raw_post(base, path, b"", length="-5") == 400
+    assert raw_post(base, path, b"t=secret-token&reason=" + b"x" * 17 * 1024) == 413
+    assert raw_post(base, path, b"t=secret-token&reason=\xff") == 400
+    assert raw_post(base, path, b"t=secret-token&reason=%FF") == 400
+    assert raw_post(base, path, b"t=secret-token&garbage") == 400
+    assert raw_post(base, path, "t=é".encode()) == 403
+    assert httpx.get(f"{base}/incidents/{incident_id}?t=%C3%A9").status_code == 403
+    incident = store.incident(incident_id)
+    assert incident is not None
+    assert incident["decision"] is None
+
+
+def test_the_page_escapes_a_reason_and_ticket(page_server: tuple[str, Store]):
+    base, store = page_server
+    incident_id = store.open(IMPORT, T0)
+    store.save_proposal(incident_id, PROPOSAL.to_json(), "secret-token", T0)
+    script = "<script>alert(1)</script>"
+    form = {"t": "secret-token", "reason": script, "ticket": script}
+    page = httpx.post(f"{base}/incidents/{incident_id}/reject", data=form)
+    assert page.status_code == 200
+    assert script not in page.text
+    assert "Ticket: &lt;script&gt;alert(1)&lt;/script&gt;" in page.text

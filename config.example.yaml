@@ -114,12 +114,14 @@ rules:
   #   resolve_after: 36    # recurs every hour or so: keep one incident open for 3 h
   # One incident per bug, not per record: series that share key_labels are merged, {count}
   # is how many, other labels list their values. rewrite cleans values before the key is built.
+  # record_labels name one record, so ticket cards count records instead of incidents.
   # - name: import-failed
   #   kind: logs_insights
   #   sources: [shop-a]
   #   log_groups: ['$logs']
   #   query: 'filter level = "error" | stats count(*) as value by type, code, reason'
   #   key_labels: [type, reason]
+  #   record_labels: [code]               # one record: a customer
   #   title: Import of customers          # the problem's name on ticket cards
   #   rewrite:
   #     reason:
@@ -180,4 +182,5 @@ rules:
 #   max_per_hour: 4
 #   port: 8765                           # the local decision page
 # logos:                                 # in front of the shop name on ticket cards, by `shop`
-#   shop-a: ~/.config/incident-scout/logos/shop-a.png   # png/jpg up to 30 KB, or an https URL
+#   shop-a: ~/.config/incident-scout/logos/shop-a.png   # png/jpg up to 18 KB, or an https URL;
+#                                        # a card over 27 KB goes out without the logo
