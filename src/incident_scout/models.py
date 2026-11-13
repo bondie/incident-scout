@@ -37,6 +37,8 @@ class Finding:
     summary: str
     value: float | None = None
     url: str | None = None
+    labels: dict[str, str] = field(default_factory=dict)
+    members: tuple[str, ...] = ()
 
     @property
     def fingerprint(self) -> str:
@@ -56,6 +58,7 @@ class Event:
         "proposed",
         "approved",
         "rejected",
+        "covered",
         "blind",
         "restored",
         "rule_failing",

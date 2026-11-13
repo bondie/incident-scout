@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Coroutine
+from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
 
+from incident_scout.config import load_config
 from incident_scout.engine import backtest, describe, episodes, run_check, with_offset
 from incident_scout.models import Alert, Series
 from incident_scout.rules import Rule, evaluate, render
@@ -130,3 +132,85 @@ def test_with_offset_shifts_every_range_selector():
 def test_alertmanager_rules_cannot_be_backtested():
     with pytest.raises(ValueError, match="no history"):
         run(backtest(Rule("a", "alertmanager"), FakeTelemetry(), 0, 1, 60))
+
+
+CONNECTOR_RULE = r"""
+vars: {shop: Kovian}
+source: {type: http, loki_url: "http://loki"}
+rules:
+  - name: connector
+    kind: logql
+    query: 'failed'
+    key_labels: [type, reason]
+    rewrite:
+      reason:
+        - ['\s*\([^)]*\)\.?$', '']
+        - ['\s*\[(entityType|externalCode): [^\]]*\]', '']
+        - ['(externalCode: )[^)\s]+', '\1…']
+        - ['(?:[A-Za-z]+\\\\)+([A-Za-z]+)', '\1']
+    summary: '$shop: KARAT {type} se nepropsal na e-shop ({count}x: {code}) - {reason}'
+"""
+
+
+def test_rewritten_series_of_one_problem_become_one_finding(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(CONNECTOR_RULE)
+    rule = load_config(path).rule("connector")
+    reason = r"App\\Entity\\Customer: First name is too short"
+    telemetry = FakeTelemetry(
+        logs={
+            "failed": [
+                series(1, type="customer", code="C1", reason=f"{reason} (x)."),
+                series(2, type="customer", code="C2", reason=f"{reason} (EB2-1.5-125-60x104)."),
+                series(1, type="customer", code="C3", reason=f"{reason} [externalCode: K7] (x)"),
+                series(5, type="order", code="O1", reason="Unknown payment (card)."),
+            ]
+        }
+    )
+    customers, orders = run(evaluate(rule, telemetry))
+    assert customers.summary == (
+        "Kovian: KARAT customer se nepropsal na e-shop (3x: C1, C2, C3) - "
+        "Customer: First name is too short"
+    )
+    assert customers.key == "type=customer,reason=Customer: First name is too short"
+    assert customers.value == 4
+    assert customers.members == ("C1", "C2", "C3")
+    assert customers.labels == {"type": "customer", "reason": "Customer: First name is too short"}
+    assert orders.summary == "Kovian: KARAT order se nepropsal na e-shop (1x: O1) - Unknown payment"
+
+
+def test_merged_labels_show_five_distinct_values_and_how_many_more():
+    rule = Rule("import", "logql", query="q", key_labels=("type",), summary="{count} {code}")
+    codes = ["c1", "c2", "c1", "c3", "c4", "c5", "c6", "c7", "c8"]
+    telemetry = FakeTelemetry(logs={"q": [series(1, type="t", code=code) for code in codes]})
+    (finding,) = run(evaluate(rule, telemetry))
+    assert finding.summary == "9 c1, c2, c3, c4, c5 +3"
+    assert finding.value == 9
+
+
+def test_without_key_labels_every_series_stays_its_own_finding():
+    telemetry = FakeTelemetry(
+        metrics={"disk > 0.85": [series(0.9, shop="a"), series(0.8, shop="a"), series(0.7)]}
+    )
+    findings = run(evaluate(DISK, telemetry))
+    assert [(f.key, f.value, f.summary) for f in findings] == [
+        ("shop=a", 0.9, "a: 90% full"),
+        ("shop=a", 0.8, "a: 80% full"),
+        ("", 0.7, "{shop}: 70% full"),
+    ]
+    assert [f.members for f in findings] == [(), (), ()]
+
+
+def test_backtests_group_rewritten_series_like_checks():
+    rule = Rule(
+        "r", "logql", query="q", key_labels=("reason",), rewrite={"reason": ((r" \(.*", ""),)}
+    )
+    found = episodes(
+        rule,
+        [
+            Series({"reason": "short (x)"}, [(0.0, 1.0)]),
+            Series({"reason": "short (y)"}, [(60.0, 1.0)]),
+        ],
+        step=60,
+    )
+    assert [(e.key, e.points) for e in found] == [("reason=short", 2)]

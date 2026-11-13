@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -68,11 +69,21 @@ INCIDENT_COLUMNS = (
     "proposal_token",
     "decision",
     "decided_at",
+    "decision_reason",
+    "decision_ticket",
+    "labels",
+    "members",
 )
+ID_PREFIX = "SCOUT-"
 
 
 def iso(moment: datetime) -> str:
     return moment.astimezone(UTC).replace(microsecond=0).isoformat()
+
+
+def short_id(incident_id: int) -> str:
+    """The id a person copies from a card or notification, e.g. SCOUT-47."""
+    return f"{ID_PREFIX}{incident_id}"
 
 
 class Store:
@@ -144,15 +155,26 @@ class Store:
         with self.db:
             self.db.execute(
                 "UPDATE incidents SET proposal = ?, proposal_token = ?, proposed_at = ?, "
-                "decision = NULL, decided_at = NULL WHERE id = ?",
+                "decision = NULL, decided_at = NULL, decision_reason = NULL, "
+                "decision_ticket = NULL WHERE id = ?",
                 (proposal, token, iso(now), incident_id),
             )
 
-    def decide(self, incident_id: int, decision: str, now: datetime) -> None:
+    def decide(
+        self,
+        incident_id: int,
+        decision: str,
+        now: datetime,
+        reason: str | None = None,
+        ticket: str | None = None,
+    ) -> None:
+        """A decision without a reason or ticket keeps the ones recorded before."""
         with self.db:
             self.db.execute(
-                "UPDATE incidents SET decision = ?, decided_at = ? WHERE id = ?",
-                (decision, iso(now), incident_id),
+                "UPDATE incidents SET decision = ?, decided_at = ?, "
+                "decision_reason = COALESCE(?, decision_reason), "
+                "decision_ticket = COALESCE(?, decision_ticket) WHERE id = ?",
+                (decision, iso(now), reason, ticket, incident_id),
             )
 
     def proposals_since(self, moment: datetime) -> int:
@@ -180,6 +202,12 @@ class Store:
                 ],
             )
 
+    def has_event(self, incident_id: int, kind: str) -> bool:
+        row = self.db.execute(
+            "SELECT 1 FROM events WHERE incident_id = ? AND kind = ? LIMIT 1", (incident_id, kind)
+        ).fetchone()
+        return row is not None
+
     def timeline(self, incident: sqlite3.Row) -> list[sqlite3.Row]:
         """The incident's own events plus monitoring health changes while it was open."""
         return self.db.execute(
@@ -198,7 +226,7 @@ class Store:
         with self.db:
             cursor = self.db.execute(
                 "INSERT INTO incidents (fingerprint, rule, severity, summary, value, url, "
-                "opened_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "opened_at, last_seen, labels, members) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     finding.fingerprint,
                     finding.rule,
@@ -208,17 +236,29 @@ class Store:
                     finding.url,
                     first_seen or iso(now),
                     iso(now),
+                    json.dumps(finding.labels, ensure_ascii=False),
+                    _members({}, finding, now),
                 ),
             )
             self.db.execute("DELETE FROM pending WHERE fingerprint = ?", (finding.fingerprint,))
         return int(cursor.lastrowid or 0)
 
     def touch(self, incident_id: int, finding: Finding, now: datetime) -> None:
+        row = self.db.execute(
+            "SELECT members FROM incidents WHERE id = ?", (incident_id,)
+        ).fetchone()
+        known = json.loads(row["members"]) if row and row["members"] else {}
         with self.db:
             self.db.execute(
-                "UPDATE incidents SET last_seen = ?, value = ?, summary = ?, missed_runs = 0 "
-                "WHERE id = ?",
-                (iso(now), finding.value, finding.summary, incident_id),
+                "UPDATE incidents SET last_seen = ?, value = ?, summary = ?, missed_runs = 0, "
+                "members = ? WHERE id = ?",
+                (
+                    iso(now),
+                    finding.value,
+                    finding.summary,
+                    _members(known, finding, now),
+                    incident_id,
+                ),
             )
 
     def miss(self, incident_id: int) -> int:
@@ -312,3 +352,9 @@ class Store:
 
     def failing_rules(self) -> list[sqlite3.Row]:
         return self.db.execute("SELECT * FROM rule_health ORDER BY rule").fetchall()
+
+
+def _members(known: dict[str, str], finding: Finding, now: datetime) -> str:
+    """Every record the problem has hit, with when it was first seen."""
+    seen = dict.fromkeys((m for m in finding.members if m not in known), iso(now))
+    return json.dumps({**known, **seen}, ensure_ascii=False)
