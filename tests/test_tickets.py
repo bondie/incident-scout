@@ -482,6 +482,8 @@ def test_check_and_decisions_keep_a_status_file_for_a_viewer(
     assert [row["id"] for row in shown["open"]] == [f"SCOUT-{incident_id}"]
     proposal = shown["proposals"][0]["proposal"]
     assert proposal["title"] == "Shop A: disk runs full"
+    assert proposal["reason"]
+    assert "diagnosis" in shown["proposals"][0]
     assert proposal["page"].startswith(f"http://127.0.0.1:8766/incidents/{incident_id}?t=")
 
     assert scout(config_path, "decide", str(incident_id), "reject") == 0
@@ -494,3 +496,31 @@ def test_check_and_decisions_keep_a_status_file_for_a_viewer(
 def test_a_rule_fanned_out_over_sources_names_its_project():
     assert status.project("aws-5xx@shop-a") == "shop-a"
     assert status.project("http-5xx") is None
+
+
+def test_the_status_keeps_the_verdict_of_a_diagnosis_without_bookkeeping():
+    text = json.dumps(
+        {
+            "summary": "Disk runs full",
+            "likely_cause": "logs",
+            "category": "infrastructure",
+            "scope": "single_shop",
+            "confidence": "high",
+            "next_steps": ["rotate logs"],
+            "key_evidence": "not a list",
+            "model": "m",
+            "seconds": 3.0,
+        }
+    )
+
+    assert status.diagnosis(text) == {
+        "summary": "Disk runs full",
+        "likely_cause": "logs",
+        "category": "infrastructure",
+        "scope": "single_shop",
+        "confidence": "high",
+        "next_steps": ["rotate logs"],
+        "key_evidence": [],
+    }
+    assert status.diagnosis(None) is None
+    assert status.diagnosis("[1]") is None
