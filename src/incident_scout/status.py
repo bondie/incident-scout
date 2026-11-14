@@ -21,6 +21,8 @@ from .state import Store, iso, short_id
 
 VERSION = 1
 RECENT = 5
+DIAGNOSIS_FIELDS = ("summary", "likely_cause", "category", "scope", "confidence")
+DIAGNOSIS_LISTS = ("next_steps", "key_evidence")
 
 
 def status_path(state_path: Path) -> Path:
@@ -80,6 +82,8 @@ def incident(row: sqlite3.Row, base: str | None) -> dict[str, Any]:
         "last_seen": row["last_seen"],
         "resolved_at": row["resolved_at"],
         "url": row["url"],
+        "value": row["value"],
+        "diagnosis": diagnosis(row["diagnosis"]),
         "proposal": None,
     }
     if not row["proposal"]:
@@ -91,12 +95,29 @@ def incident(row: sqlite3.Row, base: str | None) -> dict[str, Any]:
         "priority": proposal.priority,
         "recommendation": proposal.recommendation,
         "existing_ticket": proposal.existing_ticket or None,
+        "reason": proposal.reason or None,
+        "description": proposal.description or None,
         "proposed_at": row["proposed_at"],
         "decision": row["decision"],
         "ticket": row["decision_ticket"],
         "page": server.links(base, row["id"], token)["detail"] if base and token else None,
     }
     return data
+
+
+def diagnosis(text: str | None) -> dict[str, Any] | None:
+    """The investigator's verdict without the model bookkeeping; None when there is none."""
+    try:
+        data = json.loads(text or "")
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    found: dict[str, Any] = {key: data.get(key) for key in DIAGNOSIS_FIELDS}
+    for key in DIAGNOSIS_LISTS:
+        value = data.get(key)
+        found[key] = [str(item) for item in value] if isinstance(value, list) else []
+    return found
 
 
 def write(store: Store, now: datetime, port: int | None) -> None:
