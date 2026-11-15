@@ -272,19 +272,23 @@ def _propose_due(config: Config, store: Store, now: datetime) -> None:
     """Propose a ticket for incidents that last or keep coming back, once per problem."""
     settings = _tickets(config)
     for incident in store.open_incidents():
-        if incident["proposal"]:
+        if incident["proposal"] or not incident["announced_at"]:
             continue
         history = store.same_problem(
             incident["fingerprint"], now - timedelta(days=settings.recurring_days)
         )
-        cover = _cover(history)
+        covering = _covering(incident, history)
+        cover = _cover(covering)
         if cover:
             _note_cover(store, incident, cover, now)
             continue
-        if any(row["proposal"] for row in history):
+        if any(row["proposal"] for row in covering):
             continue
-        lasted = now - datetime.fromisoformat(incident["opened_at"])
-        if lasted < timedelta(minutes=settings.after_minutes) and len(history) < settings.recurring:
+        lasted = datetime.fromisoformat(incident["last_seen"]) - datetime.fromisoformat(
+            incident["opened_at"]
+        )
+        brief = lasted < timedelta(minutes=settings.after_minutes)
+        if brief and len(_recurring(incident, history)) < settings.recurring:
             continue
         if store.proposals_since(now - timedelta(hours=1)) >= settings.max_per_hour:
             print("ticket proposals skipped: hourly budget used up", file=sys.stderr)
@@ -293,6 +297,32 @@ def _propose_due(config: Config, store: Store, now: datetime) -> None:
             _make_proposal(config, store, incident, now, send=True)
         except Exception as error:  # a failed proposal must not break monitoring
             print(f"proposal for #{incident['id']} failed: {error}", file=sys.stderr)
+
+
+def _related_history(
+    store: Store, incident: sqlite3.Row, now: datetime, days: int
+) -> list[sqlite3.Row]:
+    """The incidents a proposal and its card speak of: those sharing a problem with this one."""
+    since = now - timedelta(days=days)
+    return _recurring(incident, store.same_problem(incident["fingerprint"], since))
+
+
+def _problem_set(row: sqlite3.Row) -> set[str]:
+    return set(json.loads(row["problems"] or "{}"))
+
+
+def _covering(incident: sqlite3.Row, history: Sequence[sqlite3.Row]) -> list[sqlite3.Row]:
+    """Earlier incidents that had every problem this one has; all of them when none are named."""
+    mine = _problem_set(incident)
+    return [row for row in history if mine <= _problem_set(row)]
+
+
+def _recurring(incident: sqlite3.Row, history: Sequence[sqlite3.Row]) -> list[sqlite3.Row]:
+    """Incidents that share a problem with this one, so unrelated failures do not add up."""
+    mine = _problem_set(incident)
+    if not mine:
+        return list(history)
+    return [row for row in history if mine & _problem_set(row)]
 
 
 def _cover(history: Sequence[sqlite3.Row]) -> str:
@@ -322,9 +352,7 @@ def _make_proposal(
     config: Config, store: Store, incident: sqlite3.Row, now: datetime, send: bool
 ) -> Proposal:
     settings = _tickets(config)
-    history = store.same_problem(
-        incident["fingerprint"], now - timedelta(days=settings.recurring_days)
-    )
+    history = _related_history(store, incident, now, settings.recurring_days)
     proposal = draft(triage.investigator(config), incident, history, now)
     token = new_token()
     store.save_proposal(incident["id"], proposal.to_json(), token, now)
@@ -358,9 +386,7 @@ def _card(
     now: datetime,
 ) -> dict[str, Any]:
     settings = _tickets(config)
-    history = store.same_problem(
-        incident["fingerprint"], now - timedelta(days=settings.recurring_days)
-    )
+    history = _related_history(store, incident, now, settings.recurring_days)
     rule = next(
         (r for r in config.rules if r.name == incident["rule"]), Rule(incident["rule"], "promql")
     )
@@ -551,9 +577,10 @@ def _status(args: argparse.Namespace) -> int:
     incidents = store.open_incidents()
     print(f"\nopen incidents: {len(incidents)}")
     for row in incidents:
+        held = "" if row["announced_at"] else "(gathering, not told yet) "
         print(
             f"  {short_id(row['id']):<10} {row['severity']:<8} since {_local(row['opened_at'])}  "
-            f"{row['summary']}"
+            f"{held}{row['summary']}"
         )
     pending = store.pending()
     if pending:

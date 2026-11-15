@@ -31,6 +31,10 @@ class Rule:
     `rewrite` maps a label to [regex, replacement] pairs applied before the key is computed;
     series that then share a key are merged into one finding. `record_labels` name one record
     such a problem hit (a customer code), so ticket cards count records instead of incidents.
+    `problem_labels` tell apart the problems one incident gathers (the failure reason when the
+    key is only the record type): each new one is announced, and ticket proposals recur and
+    are covered per problem. `hold` is how long an incident collects quietly before it is
+    announced, so a burst of failures arrives as one notice.
     `title` names the problem on ticket cards; `shop` and `shop_title` default to the vars of
     the rule's source.
     """
@@ -52,6 +56,8 @@ class Rule:
     resolve_after: int | None = None
     rewrite: Rewrite = field(default_factory=dict)
     record_labels: tuple[str, ...] = ()
+    problem_labels: tuple[str, ...] = ()
+    hold: str = ""
     title: str = ""
     shop: str = ""
     shop_title: str = ""
@@ -69,7 +75,7 @@ async def evaluate(rule: Rule, telemetry: Telemetry, now: float | None = None) -
     problems = [
         Series(rewritten(rule, s.labels), s.points) for s in series if rule.breached(s.last)
     ]
-    if not rule.key_labels and not rule.rewrite:
+    if not rule.key_labels and not rule.rewrite and not rule.problem_labels:
         return [_series_finding(rule, [s]) for s in problems]
     groups: dict[str, list[Series]] = {}
     for item in problems:
@@ -140,11 +146,43 @@ def _series_finding(rule: Rule, group: Sequence[Series]) -> Finding:
     url = render(rule.url, values) if rule.url else None
     members = tuple(dict.fromkeys(filter(None, (_member(rule, item) for item in group))))
     own = key_values(rule, group[0].labels)
-    return Finding(rule.name, key, rule.severity, summary, value, url, own, members)
+    problems = _problems(rule, group)
+    return Finding(rule.name, key, rule.severity, summary, value, url, own, members, problems)
 
 
 def _member(rule: Rule, series: Series) -> str:
     return " / ".join(series.labels[name] for name in rule.record_labels if name in series.labels)
+
+
+def problem_of(rule: Rule, labels: Mapping[str, str]) -> str:
+    return " / ".join(labels.get(name, "") for name in rule.problem_labels)
+
+
+def _problems(rule: Rule, group: Sequence[Series]) -> dict[str, tuple[str, ...]]:
+    """The records each problem hit; a problem without records maps to no records."""
+    if not rule.problem_labels:
+        return {}
+    found: dict[str, dict[str, None]] = {}
+    for item in group:
+        records = found.setdefault(problem_of(rule, item.labels), {})
+        member = _member(rule, item)
+        if member:
+            records[member] = None
+    return {problem: tuple(records) for problem, records in found.items()}
+
+
+def digest_summary(rule: Rule, finding: Finding, problems: Mapping[str, Sequence[str]]) -> str:
+    """The summary of everything an incident gathered, not only of the latest check."""
+    records = list(dict.fromkeys(record for hit in problems.values() for record in hit))
+    values: dict[str, Any] = {**finding.labels, "value": finding.value, "rule": rule.name}
+    values["count"] = len(records) or len(problems)
+    several = len(rule.problem_labels) > 1
+    for position, name in enumerate(rule.problem_labels):
+        parts = [problem.split(" / ")[position] if several else problem for problem in problems]
+        values[name] = capped(list(dict.fromkeys(parts)))
+    if len(rule.record_labels) == 1 and records:
+        values[rule.record_labels[0]] = capped(records)
+    return render(rule.summary, values) if rule.summary else finding.summary
 
 
 def _names(group: Sequence[Series]) -> list[str]:

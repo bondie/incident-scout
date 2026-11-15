@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -73,6 +73,8 @@ INCIDENT_COLUMNS = (
     "decision_ticket",
     "labels",
     "members",
+    "problems",
+    "announced_at",
 )
 ID_PREFIX = "SCOUT-"
 
@@ -99,6 +101,8 @@ class Store:
             for column in INCIDENT_COLUMNS:
                 if column not in columns:
                     self.db.execute(f"ALTER TABLE incidents ADD COLUMN {column} TEXT")
+            if "announced_at" not in columns:
+                self.db.execute("UPDATE incidents SET announced_at = opened_at")
 
     def close(self) -> None:
         self.db.close()
@@ -223,43 +227,71 @@ class Store:
         ).fetchone()
         return int(row[0])
 
-    def open(self, finding: Finding, now: datetime, first_seen: str | None = None) -> int:
+    def open(
+        self,
+        finding: Finding,
+        now: datetime,
+        first_seen: str | None = None,
+        held: bool = False,
+        summary: str | None = None,
+        problems: Mapping[str, Mapping[str, str]] | None = None,
+    ) -> int:
+        """A held incident gathers quietly; `announce` marks when a person was told."""
+        opened = first_seen or iso(now)
         with self.db:
             cursor = self.db.execute(
                 "INSERT INTO incidents (fingerprint, rule, severity, summary, value, url, "
-                "opened_at, last_seen, labels, members) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "opened_at, last_seen, labels, members, problems, announced_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     finding.fingerprint,
                     finding.rule,
                     finding.severity,
-                    finding.summary,
+                    summary or finding.summary,
                     finding.value,
                     finding.url,
-                    first_seen or iso(now),
+                    opened,
                     iso(now),
                     json.dumps(finding.labels, ensure_ascii=False),
-                    _members({}, finding, first_seen or iso(now)),
+                    _members({}, finding, opened),
+                    json.dumps(problems, ensure_ascii=False) if problems else None,
+                    None if held else opened,
                 ),
             )
             self.db.execute("DELETE FROM pending WHERE fingerprint = ?", (finding.fingerprint,))
         return int(cursor.lastrowid or 0)
 
-    def touch(self, incident_id: int, finding: Finding, now: datetime) -> None:
+    def touch(
+        self,
+        incident_id: int,
+        finding: Finding,
+        now: datetime,
+        summary: str | None = None,
+        problems: Mapping[str, Mapping[str, str]] | None = None,
+    ) -> None:
         row = self.db.execute(
-            "SELECT members FROM incidents WHERE id = ?", (incident_id,)
+            "SELECT members, problems FROM incidents WHERE id = ?", (incident_id,)
         ).fetchone()
         known = json.loads(row["members"]) if row and row["members"] else {}
+        kept = row["problems"] if row else None
         with self.db:
             self.db.execute(
                 "UPDATE incidents SET last_seen = ?, value = ?, summary = ?, missed_runs = 0, "
-                "members = ? WHERE id = ?",
+                "members = ?, problems = ? WHERE id = ?",
                 (
                     iso(now),
                     finding.value,
-                    finding.summary,
+                    summary or finding.summary,
                     _members(known, finding, iso(now)),
+                    json.dumps(problems, ensure_ascii=False) if problems else kept,
                     incident_id,
                 ),
+            )
+
+    def announce(self, incident_id: int, now: datetime) -> None:
+        with self.db:
+            self.db.execute(
+                "UPDATE incidents SET announced_at = ? WHERE id = ?", (iso(now), incident_id)
             )
 
     def miss(self, incident_id: int) -> int:

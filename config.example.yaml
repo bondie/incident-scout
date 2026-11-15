@@ -127,6 +127,18 @@ rules:
   #     reason:
   #       - ['\s*\([^)]*\)\.?$', '']        # drop a trailing "(value)."
   #   summary: '$shop: {type} import failed ({count}x: {code}) - {reason}'
+  # Bursts can wait: with hold, an incident gathers quietly and is announced once, with every
+  # record and reason it met. problem_labels tell its problems apart when the key is broader.
+  # - name: import-failed-digest
+  #   kind: logs_insights
+  #   sources: [shop-a]
+  #   log_groups: ['$logs']
+  #   query: 'filter level = "error" and type != "order" | stats count(*) as value by type, code, reason'
+  #   key_labels: [type]
+  #   problem_labels: [reason]
+  #   record_labels: [code]
+  #   hold: 2h
+  #   summary: '$shop: {type} import failed ({count}x: {code}) - {reason}'
 
 # Optional: diagnose every new incident with a local model (Ollama) and follow up on its
 # notification. Evidence queries see the incident's labels as $label and the evidence
