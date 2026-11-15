@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 from incident_scout.models import Event, Finding
 from incident_scout.rules import Rule
 from incident_scout.state import Store
@@ -103,3 +105,83 @@ def test_status_queries(store: Store):
     check(store, 10)
     assert store.recent_incidents()[0]["summary"] == ERRORS.summary
     assert store.health()["last_ok"] == minutes(10).isoformat()
+
+
+IMPORTS = Rule(
+    "import",
+    "logql",
+    query="q",
+    key_labels=("type",),
+    record_labels=("code",),
+    problem_labels=("reason",),
+    hold="2h",
+    resolve_after=2,
+    summary="{type}: {count} records ({code}) - {reason}",
+)
+
+
+def failure(*hits: tuple[str, str]) -> Finding:
+    problems: dict[str, list[str]] = {}
+    for code, reason in hits:
+        problems.setdefault(reason, []).append(code)
+    return Finding(
+        "import",
+        "type=product",
+        "warning",
+        "latest check only",
+        float(len(hits)),
+        labels={"type": "product"},
+        members=tuple(dict.fromkeys(code for code, _ in hits)),
+        problems={reason: tuple(codes) for reason, codes in problems.items()},
+    )
+
+
+def imports(store: Store, at: float, *findings: Finding):
+    result = CheckResult(list(findings), ["import"])
+    return process(store, result, {"import": IMPORTS}, minutes(at), resolve_after=2)
+
+
+def test_a_held_incident_gathers_quietly_and_is_announced_once_with_everything(store: Store):
+    assert imports(store, 0, failure(("P1", "number exists"), ("P1", "code exists"))) == []
+    assert imports(store, 5, failure(("P2", "number exists"))) == []
+    for at in range(10, 120, 5):
+        assert imports(store, at) == []  # a one-off is not resolved before it was told
+
+    (announced,) = imports(store, 120)
+    assert (announced.kind, announced.title) == ("opened", "🟠 import")
+    assert announced.message == "product: 2 records (P1, P2) - number exists, code exists"
+    assert kinds(imports(store, 125)) == ["resolved"]
+    assert store.open_incidents() == []
+
+
+def test_a_new_problem_after_the_announcement_is_told_but_not_during_the_hold(store: Store):
+    imports(store, 0, failure(("P1", "number exists")))
+    assert imports(store, 60, failure(("P2", "code exists"))) == []
+    assert kinds(imports(store, 120, failure(("P3", "code exists")))) == ["opened"]
+
+    assert imports(store, 125, failure(("P4", "code exists"))) == []
+    (grew,) = imports(store, 130, failure(("P5", "price / currency missing")))
+    assert (grew.kind, grew.message) == ("grew", "new: price / currency missing")
+    (incident,) = store.open_incidents()
+    assert incident["summary"] == (
+        "product: 5 records (P1, P2, P3, P4, P5) - number exists, code exists, "
+        "price / currency missing"
+    )
+
+
+def test_incidents_open_before_the_upgrade_count_as_announced(tmp_path):
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(path)
+    db.executescript(
+        "CREATE TABLE incidents (id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL, "
+        "rule TEXT NOT NULL, severity TEXT NOT NULL, summary TEXT NOT NULL, value REAL, "
+        "url TEXT, opened_at TEXT NOT NULL, last_seen TEXT NOT NULL, resolved_at TEXT, "
+        "missed_runs INTEGER NOT NULL DEFAULT 0);"
+        "INSERT INTO incidents (fingerprint, rule, severity, summary, opened_at, last_seen) "
+        "VALUES ('import|type=product', 'import', 'warning', 's', '2026-11-03T11:00:00+00:00', "
+        "'2026-11-03T11:00:00+00:00');"
+    )
+    db.commit()
+    db.close()
+    (incident,) = Store(path).open_incidents()
+    assert incident["announced_at"] == incident["opened_at"]

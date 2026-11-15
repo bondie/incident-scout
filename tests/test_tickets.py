@@ -185,6 +185,11 @@ def test_proposals_wait_for_lasting_or_recurring_problems(config_path: Path, cal
     cli._propose_due(config, store, T0)
     assert calls.drafts == []
 
+    store.touch(fresh, DISK, T0 + timedelta(minutes=10))
+    cli._propose_due(config, store, T0 + timedelta(minutes=25))
+    assert calls.drafts == []  # open for 35 min, but seen for only 20
+
+    store.touch(fresh, DISK, T0 + timedelta(minutes=25))
     cli._propose_due(config, store, T0 + timedelta(minutes=25))
     incident = store.incident(fresh)
     assert incident is not None
@@ -233,7 +238,8 @@ def test_the_hourly_budget_and_failures_never_break_a_check(
     config = load_config(config_path)
     store = Store(config.state_path)
     for key in ("a", "b", "c"):
-        store.open(Finding("disk", f"shop={key}", "warning", key, 1.0), T0 - timedelta(hours=1))
+        finding = Finding("disk", f"shop={key}", "warning", key, 1.0)
+        store.touch(store.open(finding, T0 - timedelta(hours=1)), finding, T0)
     posts: list[object] = []
     monkeypatch.setattr(cli, "draft", lambda *_: PROPOSAL)
     monkeypatch.setattr(teams, "post", lambda _url, payload: posts.append(payload))
@@ -524,3 +530,68 @@ def test_the_status_keeps_the_verdict_of_a_diagnosis_without_bookkeeping():
     }
     assert status.diagnosis(None) is None
     assert status.diagnosis("[1]") is None
+
+
+def gathered(store: Store, key: str, problem: str, at: datetime, held: bool = False) -> int:
+    finding = Finding("disk", f"shop={key}", "warning", key, 1.0)
+    incident_id = store.open(finding, at, held=held, problems={problem: {"R1": "t"}})
+    store.touch(incident_id, finding, at + timedelta(hours=1))
+    return incident_id
+
+
+def test_a_decision_covers_only_the_problems_it_was_about(config_path: Path, calls: Calls):
+    config = load_config(config_path)
+    store = Store(config.state_path)
+    earlier = gathered(store, "a", "number exists", T0 - timedelta(days=1))
+    store.save_proposal(earlier, PROPOSAL.to_json(), "tok", T0 - timedelta(days=1))
+    store.decide(earlier, "rejected", T0 - timedelta(days=1), "data in the ERP", None)
+    store.resolve(earlier, T0 - timedelta(hours=20))
+
+    same = gathered(store, "a", "number exists", T0 - timedelta(hours=2))
+    cli._propose_due(config, store, T0)
+    assert calls.drafts == []
+    assert store.has_event(same, "covered")
+
+    store.resolve(same, T0)
+    other = gathered(store, "a", "price missing", T0)
+    cli._propose_due(config, store, T0 + timedelta(hours=1))
+    assert len(calls.drafts) == 1
+    assert not store.has_event(other, "covered")
+
+
+def test_held_incidents_wait_and_unrelated_problems_do_not_recur(config_path: Path, calls: Calls):
+    config = load_config(config_path)
+    store = Store(config.state_path)
+    gathered(store, "a", "number exists", T0 - timedelta(hours=3), held=True)
+    cli._propose_due(config, store, T0)
+    assert calls.drafts == []
+
+    store = Store(config.state_path.with_name("other.db"))
+    for days_ago, problem in ((3, "code exists"), (2, "price missing")):
+        at = T0 - timedelta(days=days_ago)
+        store.resolve(store.open(DISK, at, problems={problem: {}}), at + timedelta(minutes=5))
+    brief_one = store.open(DISK, T0 - timedelta(minutes=5), problems={"number exists": {}})
+    cli._propose_due(config, store, T0)
+    assert calls.drafts == []
+
+    store.resolve(brief_one, T0)
+    store.open(DISK, T0, problems={"code exists": {}, "price missing": {}})
+    cli._propose_due(config, store, T0 + timedelta(minutes=5))
+    assert len(calls.drafts) == 1
+
+
+def test_status_tells_a_gathering_incident_apart(
+    config_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    store = Store(load_config(config_path).state_path)
+    gathered(store, "b", "number exists", T0, held=True)
+    told = opened(store, 5)
+    assert scout(config_path, "status") == 0
+    out = capsys.readouterr().out
+    assert "(gathering, not told yet) b" in out
+    assert "(gathering, not told yet) a: 95%" not in out
+
+    assert scout(config_path, "status", "--json") == 0
+    shown = {row["id"]: row for row in json.loads(capsys.readouterr().out)["open"]}
+    assert shown[f"SCOUT-{told}"]["announced_at"]
+    assert [row["announced_at"] for row in shown.values()].count(None) == 1

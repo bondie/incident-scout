@@ -39,6 +39,7 @@ class Finding:
     url: str | None = None
     labels: dict[str, str] = field(default_factory=dict)
     members: tuple[str, ...] = ()
+    problems: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def fingerprint(self) -> str:
@@ -51,6 +52,7 @@ class Event:
 
     kind: Literal[
         "opened",
+        "grew",
         "resolved",
         "diagnosed",
         "diagnosis_failed",

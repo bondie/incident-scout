@@ -16,6 +16,7 @@ import yaml
 from .evidence import EvidenceKind, EvidenceQuery
 from .models import SEVERITIES
 from .rules import Rule, RuleKind
+from .sources.base import parse_duration
 from .sources.cloudwatch import CloudWatchTelemetry
 from .sources.http import HttpTelemetry
 from .sources.mcp import McpTelemetry, McpTools
@@ -322,9 +323,15 @@ def _rule(item: Mapping[str, Any], variables: Mapping[str, str]) -> Rule:
             data[key] = Template(data[key]).safe_substitute(variables)
     for key in ("shop", "shop_title"):
         data.setdefault(key, variables.get(key, ""))
-    for key in ("key_labels", "record_labels"):
+    for key in ("key_labels", "record_labels", "problem_labels"):
         if key in data:
             data[key] = tuple(data[key])
+    if data.get("hold"):
+        try:
+            parse_duration(str(data["hold"]))
+        except ValueError as error:
+            raise ConfigError(f"rules.{name}.hold must be a duration like 2h: {error}") from error
+        data["hold"] = str(data["hold"])
     if "log_groups" in data:
         data["log_groups"] = _substituted(data["log_groups"], variables)
     if "rewrite" in data:

@@ -7,7 +7,7 @@ from typing import Any, TypeVar
 
 import pytest
 
-from incident_scout.config import load_config
+from incident_scout.config import ConfigError, load_config
 from incident_scout.engine import backtest, describe, episodes, run_check, with_offset
 from incident_scout.models import Alert, Series
 from incident_scout.rules import Rule, evaluate, render
@@ -226,3 +226,41 @@ def test_thresholds_apply_to_each_series_before_merging():
     )
     (finding,) = run(evaluate(rule, telemetry))
     assert (finding.value, finding.summary) == (9, "1 a 9")
+
+
+def test_problem_labels_keep_the_records_of_each_problem_in_one_finding():
+    rule = Rule(
+        "import",
+        "logql",
+        query="q",
+        key_labels=("type",),
+        record_labels=("code",),
+        problem_labels=("reason",),
+    )
+    telemetry = FakeTelemetry(
+        logs={
+            "q": [
+                series(1, type="product", code="P1", reason="number exists"),
+                series(1, type="product", code="P1", reason="code exists"),
+                series(1, type="product", code="P2", reason="number exists"),
+            ]
+        }
+    )
+    (finding,) = run(evaluate(rule, telemetry))
+    assert finding.key == "type=product"
+    assert finding.members == ("P1", "P2")
+    assert finding.problems == {"number exists": ("P1", "P2"), "code exists": ("P1",)}
+
+
+def test_hold_and_problem_labels_come_from_the_config(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        CONNECTOR_RULE.replace("key_labels: [type, reason]", "key_labels: [type]")
+        + "    problem_labels: [reason]\n    hold: 2h\n"
+    )
+    rule = load_config(path).rule("connector")
+    assert (rule.problem_labels, rule.hold) == (("reason",), "2h")
+
+    path.write_text(CONNECTOR_RULE + "    hold: soon\n")
+    with pytest.raises(ConfigError, match="hold must be a duration"):
+        load_config(path)
