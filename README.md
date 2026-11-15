@@ -132,6 +132,29 @@ rules whose other labels are only an instance or a job, cards count incidents.
 `resolve_after` on a rule overrides the global one, so a failure that recurs every hour stays
 one incident instead of a notification every hour.
 
+Failures that arrive in bursts, such as records an ERP import keeps rejecting, can be
+**gathered before they are told**. With `hold`, a new incident is opened quietly and
+announced once the hold is over, with everything it gathered meanwhile; a one-off failure is
+still announced, only later, and is never resolved before it was told. `problem_labels` tell
+apart the problems one incident gathers when its key is broader than one bug:
+
+```yaml
+  - name: connector-import-failed
+    kind: logs_insights
+    log_groups: ['$logs']
+    query: 'filter level = "error" | stats count(*) as value by type, code, reason'
+    key_labels: [type]                 # one incident per record type...
+    problem_labels: [reason]           # ...that lists every reason it met
+    record_labels: [code]
+    hold: 2h
+    summary: '$shop: {type} import failed ({count}x: {code}) - {reason}'
+```
+
+The summary then covers the whole incident, not only the latest check: `{count}` is the
+number of records, `{code}` and `{reason}` list every record and reason seen so far. A reason
+that first appears after the announcement is told on its own (*new: ...*). Keep a separate
+rule without `hold` for failures that must not wait.
+
 ## Amazon CloudWatch
 
 Each AWS account is one named source. A rule or an evidence query with `sources: [a, b]` runs
@@ -252,8 +275,9 @@ synonyms, and every group must match, the same as in the case files.
 ### Should this become a ticket?
 
 Some incidents need a developer's work and a ticket for the project manager; most do not.
-With a `tickets` section, an incident that lasts (30 minutes by default) or keeps coming back
-(the third time in 7 days) gets a **ticket proposal**: the model reads the incident, how often
+With a `tickets` section, an incident that lasts (seen for 30 minutes by default, from its
+first to its latest sighting, so a one-off failure that stays open until `resolve_after` does
+not count) or keeps coming back (the third time in 7 days) gets a **ticket proposal**: the model reads the incident, how often
 the same problem happened, the diagnosis and the evidence, and recommends one of
 *create a ticket*, *no ticket needed*, or *already in ticket X* (only for a similar ticket of
 the same shop). It also drafts the ticket for the PM in JIRA markup: what happens and since
@@ -305,6 +329,9 @@ of the last `recurring_days`, a new incident of the same problem is still opened
 but instead of a new proposal it gets a *covered by SHOP-123* line in the log and timeline,
 nothing in Teams. Without a ticket or reason, any earlier proposal of the problem in that
 window blocks a new one, as before. A decision without them keeps the ones recorded earlier.
+For a rule with `problem_labels`, both count per problem: a decision covers an incident only
+when it was about every problem the incident has, and only incidents that share a problem
+add up to *keeps coming back*. A held incident gets no proposal before it is announced.
 
 ### Choosing a model
 

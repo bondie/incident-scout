@@ -79,6 +79,7 @@ def incident(row: sqlite3.Row, base: str | None) -> dict[str, Any]:
         "severity": row["severity"],
         "summary": row["summary"],
         "opened_at": row["opened_at"],
+        "announced_at": row["announced_at"],
         "last_seen": row["last_seen"],
         "resolved_at": row["resolved_at"],
         "url": row["url"],
