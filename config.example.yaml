@@ -36,6 +36,10 @@ source:
 #     index: 'shop-a-*'                # a rule's own `index` overrides it
 #     # headers: {Authorization: "ApiKey ${ES_API_KEY}"}
 #     vars: {shop: shop-a}
+#   cluster:                           # one cluster for all shops: the shop is in a label
+#     type: http
+#     prometheus_url: https://prometheus.example
+#     vars: {shop: cluster, shop_label: namespace, shop_pattern: '^app-(?P<shop>[a-z0-9]+)-prod$'}
 
 # $name placeholders in queries, summaries and URLs.
 vars:
@@ -228,3 +232,7 @@ rules:
 # logos:                                 # in front of the shop name on ticket cards, by `shop`
 #   shop-a: ~/.config/incident-scout/logos/shop-a.png   # png/jpg up to 18 KB, or an https URL;
 #                                        # a card over 27 KB goes out without the logo
+# shop_titles:                           # the shop name on Teams cards, by `shop`; a rule's
+#   shop-a: Shop A                       # `shop_title` wins, else the shop capitalised
+# shop_aliases:                          # a shop found by shop_pattern -> its key in logos
+#   a: shop-a                            # and shop_titles

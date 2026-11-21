@@ -87,7 +87,8 @@ def test_old_databases_gain_the_new_columns(tmp_path: Path):
     row = store.incident(1)
     assert row is not None
     card = cli._card(config, store, row, proposal, "tok", now)
-    assert card["attachments"][0]["content"]["body"][-1]["text"] == "SCOUT-1 · disk"
+    assert "SCOUT-1 | " in json.dumps(card, ensure_ascii=False)
+    assert "{{DATE(2026-11-01T00:00:00+00:00, SHORT)}}" in json.dumps(card)
     assert "SCOUT-1 · disk" in server.page(row, "English", "http://127.0.0.1:1")
     store.touch(1, Finding("disk", "shop=a", "warning", "new", 1.0, members=("C1",)), now)
     touched = store.incident(1)

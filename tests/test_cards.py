@@ -4,7 +4,7 @@ import asyncio
 import http.client
 import json
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from incident_scout import cli, teams, triage
-from incident_scout.config import Config, load_config
+from incident_scout.config import Config, ConfigError, load_config
 from incident_scout.models import Finding
 from incident_scout.proposal import Proposal
 from incident_scout.rules import Rule, evaluate
@@ -38,6 +38,45 @@ rules:
   - {{name: down, kind: promql, query: 'up == 0', key_labels: [shop], title: Shop down}}
 """
 IMPORT = Finding("import", "type=customer", "warning", "3x import failed", 3.0)
+ORCHESTY = """
+state_path: {state}
+source: {{type: http, prometheus_url: "http://prom", vars: {{shop: kovian}}}}
+sources:
+  orchesty:
+    type: http
+    prometheus_url: "http://prom"
+    vars:
+      shop: orchesty
+      shop_label: namespace
+      shop_pattern: '^orchesty-(?P<shop>[a-z]+)-prod$'
+notify: {{desktop: false}}
+investigator: {{model: tiny, language: Czech}}
+tickets: {{teams_url: "https://teams.example/hook", recurring_days: 7, port: 8766}}
+logos: {{prod-hetzner-albra: {logo}, haspl: {logo}}}
+shop_titles: {{prod-hetzner-albra: Albra, orchesty: Orchesty, haspl: Hašpl}}
+shop_aliases: {{albra: prod-hetzner-albra}}
+rules:
+  - {{name: oom, kind: promql, query: oom, key_labels: [namespace], severity: critical,
+      title: Kontejner spadl na paměť, sources: [orchesty]}}
+"""
+
+
+def orchesty_config(tmp_path: Path) -> Config:
+    logo = tmp_path / "shop.png"
+    logo.write_bytes(b"\x89PNG shop")
+    path = tmp_path / "config.yaml"
+    path.write_text(ORCHESTY.format(state=tmp_path / "state.db", logo=logo))
+    return load_config(path)
+
+
+def oom(namespace: str) -> Finding:
+    return Finding(
+        "oom@orchesty",
+        f"namespace={namespace}",
+        "critical",
+        f"Orchesty {namespace}: kontejner detector spadl na paměť (OOMKilled)",
+        labels={"namespace": namespace},
+    )
 
 
 def card_config(tmp_path: Path, logos: str = "", title: str = "") -> Config:
@@ -53,19 +92,89 @@ def content(card: dict[str, Any]) -> dict[str, Any]:
 
 
 def texts(element: Any) -> list[str]:
-    """Every TextBlock text in an element tree, in order."""
+    """Every visible text in an element tree, in order; a RichTextBlock counts as one line."""
     if isinstance(element, list):
         return [text for item in element for text in texts(item)]
     if not isinstance(element, dict):
         return []
     own = [element["text"]] if element.get("type") == "TextBlock" else []
+    if element.get("type") == "RichTextBlock":
+        own = ["".join(run["text"] for run in element["inlines"])]
     children = [element[key] for key in ("body", "columns", "items") if key in element]
     return own + texts(children)
 
 
-def badge(card: dict[str, Any]) -> tuple[str, str]:
-    container = content(card)["body"][0]["columns"][-1]["items"][0]
-    return container["style"], container["items"][0]["text"]
+def runs(element: Any) -> list[str]:
+    """Every TextBlock and TextRun text on its own, as Teams renders each separately."""
+    if isinstance(element, list):
+        return [text for item in element for text in runs(item)]
+    if not isinstance(element, dict):
+        return []
+    own = [element["text"]] if element.get("type") in ("TextBlock", "TextRun") else []
+    children = [element[key] for key in ("body", "columns", "items", "inlines") if key in element]
+    return own + runs(children)
+
+
+def left(card: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = content(card)["body"][0]["columns"][0]["items"]
+    return items
+
+
+def title(card: dict[str, Any]) -> str:
+    return str(left(card)[0]["text"])
+
+
+def message(card: dict[str, Any]) -> str:
+    return str(left(card)[1]["columns"][1]["items"][0]["text"])
+
+
+def marker(card: dict[str, Any]) -> dict[str, Any]:
+    found: dict[str, Any] = left(card)[1]["columns"][0]["items"][0]
+    return found
+
+
+def meta_block(card: dict[str, Any]) -> dict[str, Any]:
+    block: dict[str, Any] = left(card)[-1]
+    if block["type"] == "ColumnSet":
+        block = block["columns"][1]["items"][0]
+    return block
+
+
+def meta(card: dict[str, Any]) -> str:
+    return "".join(run["text"] for run in meta_block(card)["inlines"])
+
+
+def status(card: dict[str, Any]) -> tuple[str, str]:
+    (run,) = [run for run in meta_block(card)["inlines"] if "color" in run]
+    return run["text"], run["color"]
+
+
+def image(card: dict[str, Any]) -> dict[str, Any] | None:
+    block = left(card)[-1]
+    if block["type"] != "ColumnSet":
+        return None
+    found: dict[str, Any] = block["columns"][0]["items"][0]
+    return found
+
+
+def stats(card: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """(label, value, the date under it) of the stats at the right of the card."""
+    columns = content(card)["body"][0]["columns"][1:]
+    if not columns:
+        return []
+    items = columns[0]["items"]
+    found = []
+    for index, item in enumerate(items):
+        if item.get("weight") != "Bolder":
+            continue
+        after = items[index + 1 : index + 2]
+        under = after[0]["text"] if after and after[0].get("spacing") == "None" else ""
+        found.append((items[index - 1]["text"], item["text"], under))
+    return found
+
+
+def moment(when: datetime) -> tuple[str, str]:
+    return f"{{{{TIME({iso(when)})}}}}", f"{{{{DATE({iso(when)}, SHORT)}}}}"
 
 
 def card_for(config: Config, store: Store, incident_id: int, proposal: Proposal = PROPOSAL):
@@ -74,7 +183,10 @@ def card_for(config: Config, store: Store, incident_id: int, proposal: Proposal 
     return cli._card(config, store, incident, proposal, "tok", T0 + timedelta(hours=1))
 
 
-def test_the_card_header_names_the_shop_and_problem_with_a_logo(
+DETAIL = "http://127.0.0.1:8766/incidents/1?t=tok"
+
+
+def test_the_card_is_one_row_with_the_shop_logo_in_the_meta_line(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
     logo = tmp_path / "kovian.png"
@@ -82,24 +194,35 @@ def test_the_card_header_names_the_shop_and_problem_with_a_logo(
     config = card_config(tmp_path, logos=f"logos: {{kovian: {logo}}}")
     store = Store(config.state_path)
     card = card_for(config, store, store.open(IMPORT, T0))
-    image, names, _badge = content(card)["body"][0]["columns"]
-    assert image["items"][0]["url"].startswith("data:image/png;base64,")
-    assert image["items"][0]["altText"] == "Kovian"
-    assert [block["text"] for block in names["items"]] == ["Import zákazníků z KARATu"]
-    assert "isSubtle" not in names["items"][0]
+    assert title(card) == f"[Shop A: disk runs full]({DETAIL})"
+    assert left(card)[0]["size"] == "Medium"
+    assert left(card)[0]["weight"] == "Bolder"
+    assert message(card) == "Disk fills up again every day."
+    assert meta(card) == "SCOUT-1 | Trvá | Kovian | priorita vysoká | import"
+    logo_block = image(card)
+    assert logo_block is not None
+    assert logo_block["url"].startswith("data:image/png;base64,")
+    assert (logo_block["altText"], logo_block["width"]) == ("Kovian", "16px")
     assert content(card)["fallbackText"] == "🎫 SCOUT-1 · Shop A: disk runs full"
 
     logo.write_bytes(b"x" * 19 * 1024)
-    big = card_for(config, store, 1)
-    assert len(content(big)["body"][0]["columns"]) == 2
+    assert image(card_for(config, store, 1)) is None
     assert "at most 18 KB" in capsys.readouterr().err
 
     titled = card_config(tmp_path, title="Kovian.sk")
-    plain = card_for(titled, store, 1)
-    header = content(plain)["body"][0]["columns"]
-    assert [column["items"][0]["type"] for column in header] == ["TextBlock", "Container"]
-    assert header[0]["items"][0]["text"] == "Kovian.sk"
+    assert "| Kovian.sk |" in meta(card_for(titled, store, 1))
     assert teams.logo("https://cdn.example/logo.png") == "https://cdn.example/logo.png"
+
+
+def test_cards_have_no_stripe_boxes_or_badges(tmp_path: Path):
+    config = card_config(tmp_path)
+    store = Store(config.state_path)
+    incident_id = store.open(IMPORT, T0)
+    store.save_diagnosis(incident_id, DIAGNOSIS.to_json(), T0)
+    shown = json.dumps(card_for(config, store, incident_id))
+    assert '"Container"' not in shown
+    assert '"style"' not in shown.replace('"style": "positive"', "")
+    assert '"bleed"' not in shown
 
 
 def test_a_shop_label_names_the_shop_when_the_source_has_no_shop_var(tmp_path: Path):
@@ -110,10 +233,37 @@ def test_a_shop_label_names_the_shop_when_the_source_has_no_shop_var(tmp_path: P
     store = Store(config.state_path)
     labelled = Finding(**{**IMPORT.__dict__, "labels": {"shop": "shop-b", "type": "customer"}})
     card = card_for(config, store, store.open(labelled, T0))
-    image, names, _badge = content(card)["body"][0]["columns"]
-    assert image["items"][0]["url"].startswith("data:image/jpeg;base64,")
-    assert image["items"][0]["altText"] == "Shop-b"
-    assert [block["text"] for block in names["items"]] == ["Import"]
+    logo_block = image(card)
+    assert logo_block is not None
+    assert logo_block["url"].startswith("data:image/jpeg;base64,")
+    assert logo_block["altText"] == "Shop-b"
+    assert "| Shop-b |" in meta(card)
+
+
+def test_shop_titles_name_a_shop_unless_the_rule_or_source_does(tmp_path: Path):
+    titles = "shop_titles: {Kovian: Kovian.cz, prod-hetzner-albra: Albra}"
+    config = card_config(tmp_path, logos=titles)
+    assert config.shop_titles == {"Kovian": "Kovian.cz", "prod-hetzner-albra": "Albra"}
+    store = Store(config.state_path)
+    kovian = store.incident(store.open(IMPORT, T0))
+    labelled = Finding(
+        **{**IMPORT.__dict__, "key": "shop=albra", "labels": {"shop": "prod-hetzner-albra"}}
+    )
+    albra = store.incident(store.open(labelled, T0))
+    assert kovian is not None
+    assert albra is not None
+
+    header = cli._card_header(config, kovian)
+    assert (header.shop, header.key, header.context) == ("Kovian.cz", "kovian", "")
+    assert "| Kovian.cz |" in meta(card_for(config, store, kovian["id"]))
+    unnamed = replace(config, rules=[Rule("import", "logql", query="q")])
+    assert cli._card_header(unnamed, albra).shop == "Albra"
+    titled = card_config(tmp_path, logos=titles, title="Kovian.sk")
+    assert cli._card_header(titled, kovian).shop == "Kovian.sk"
+
+    (tmp_path / "config.yaml").write_text("shop_titles: [kovian]")
+    with pytest.raises(ConfigError, match="shop_titles must map a shop"):
+        load_config(tmp_path / "config.yaml")
 
 
 def test_the_card_counts_records_and_shows_cause_priority_and_id(tmp_path: Path):
@@ -124,56 +274,84 @@ def test_the_card_counts_records_and_shows_cause_priority_and_id(tmp_path: Path)
     store.touch(incident_id, Finding(**{**IMPORT.__dict__, "members": ("C2", "C3")}), T0)
     store.save_diagnosis(incident_id, DIAGNOSIS.to_json(), T0)
     card = card_for(config, store, incident_id)
+    assert stats(card) == [("Záznamy (7 d)", "3", ""), ("Naposledy", *moment(T0))]
+    assert status(card) == ("Trvá", "Warning")
+    assert marker(card)["color"] == "Warning"
     body = content(card)["body"]
-    shown = texts(body)
-    assert "3 záznamy" in shown
-    assert "za 7 dní, 3 dnes" in shown
-    assert "Zasažené: C1, C2, C3" in shown
-    assert "Vysoká" in shown
-    assert "priorita" in shown
-    (cause,) = [item for item in body if item.get("style") == "emphasis"]
-    assert [block["text"] for block in cause["items"]] == ["Příčina", DIAGNOSIS.likely_cause]
-    assert not any(block.get("isSubtle") for block in cause["items"])
-    assert body[-1] == {
+    assert body[1] == {
         "type": "TextBlock",
-        "text": "SCOUT-1 · import",
+        "text": f"Příčina: {DIAGNOSIS.likely_cause}",
         "size": "Small",
-        "isSubtle": True,
         "wrap": True,
     }
-    assert badge(card) == ("warning", "⏳ Trvá")
+    assert (body[2]["text"], body[2]["isSubtle"]) == ("Zasažené: C1, C2, C3", True)
+    assert (body[3]["text"], body[3]["color"]) == ("Navrhuji založit ticket", "Accent")
+    assert [action["title"] for action in actions(content(card))] == [
+        "Schválit ticket",
+        "Zamítnout s důvodem",
+        "Detail",
+    ]
+    assert actions(content(card))[0]["style"] == "positive"
 
 
-def test_the_card_dates_the_problem_from_its_first_record(tmp_path: Path):
+def test_telemetry_joins_the_proposal_actions_when_the_incident_has_a_url(tmp_path: Path):
+    config = card_config(tmp_path)
+    store = Store(config.state_path)
+    linked = Finding(**{**IMPORT.__dict__, "url": "https://grafana/import"})
+    card = card_for(config, store, store.open(linked, T0))
+    assert actions(content(card))[-1] == {
+        "type": "Action.OpenUrl",
+        "title": "Telemetrie",
+        "url": "https://grafana/import",
+    }
+
+
+def test_the_scope_dates_the_problem_from_its_first_record(tmp_path: Path):
     config = card_config(tmp_path)
     store = Store(config.state_path)
     first = store.open(Finding(**{**IMPORT.__dict__, "members": ("C1",)}), T0)
     store.resolve(first, T0 + timedelta(minutes=10))
     later = T0 + timedelta(minutes=30)
     incident_id = store.open(Finding(**{**IMPORT.__dict__, "members": ("C2",)}), later)
-    shown = texts(content(card_for(config, store, incident_id))["body"])
-    assert f"od {teams._when(T0.astimezone())}" in shown
-    assert f"od {teams._when(later.astimezone())}" not in shown
+    incident = store.incident(incident_id)
+    assert incident is not None
+    now = T0 + timedelta(hours=1)
+    history = cli._related_history(store, incident, now, 7)
+    assert teams.scope(incident, history, now, records=True).since == iso(T0)
+    assert stats(card_for(config, store, incident_id))[1] == ("Naposledy", *moment(later))
 
 
-def test_the_badge_follows_recurrence_growth_and_resolution(tmp_path: Path):
+def test_the_status_follows_recurrence_growth_and_resolution(tmp_path: Path):
     config = card_config(tmp_path)
     store = Store(config.state_path)
     single = Finding(**{**IMPORT.__dict__, "members": ("C1",)})
     incident_id = store.open(single, T0)
-    assert "Zasažené: C1" not in texts(content(card_for(config, store, incident_id)))
+    assert not any(
+        text.startswith("Zasažené") for text in texts(content(card_for(config, store, incident_id)))
+    )
 
     store.touch(
         incident_id, Finding(**{**IMPORT.__dict__, "members": ("C9",)}), T0 + timedelta(minutes=30)
     )
-    growing = card_for(config, store, incident_id)
-    assert badge(growing) == ("attention", "📈 Přibývá")
-    assert "přibývá: +1 za poslední 3 h" in texts(content(growing))
+    assert status(card_for(config, store, incident_id)) == ("Přibývá", "Attention")
 
-    store.resolve(incident_id, T0 + timedelta(minutes=40))
+    resolved_at = T0 + timedelta(minutes=40)
+    store.resolve(incident_id, resolved_at)
     store.open(IMPORT, T0 + timedelta(minutes=50))
-    assert badge(card_for(config, store, incident_id)) == ("good", "✅ Vyřešeno")
-    assert badge(card_for(config, store, 2)) == ("attention", "🔁 Opakuje se, přibývá")
+    resolved = card_for(config, store, incident_id)
+    assert status(resolved) == ("Vyřešeno", "Good")
+    assert stats(resolved)[1] == ("Naposledy", *moment(resolved_at))
+    assert status(card_for(config, store, 2)) == ("Opakuje se, přibývá", "Attention")
+
+
+def test_an_orchesty_incident_shows_the_shop_it_hit(tmp_path: Path):
+    config = orchesty_config(tmp_path)
+    store = Store(config.state_path)
+    card = card_for(config, store, store.open(oom("orchesty-albra-prod"), T0))
+    assert meta(card) == "SCOUT-1 | Trvá | Albra | Orchesty | priorita vysoká | oom@orchesty"
+    logo_block = image(card)
+    assert logo_block is not None
+    assert logo_block["altText"] == "Albra"
 
 
 def test_store_keeps_when_each_record_was_first_seen(store: Store):
@@ -236,6 +414,10 @@ def test_an_existing_ticket_gets_a_compact_card_and_covers_the_next_incidents(
     (card,) = drafts
     assert [action["title"] for action in actions(content(card))] == ["Detail"]
     assert "Už je v ticketu: KOVIAN-SCOUT-4" in texts(content(card))
+    assert title(card).startswith("[Shop A: disk runs full](")
+    assert meta(card) == "SCOUT-1 | Trvá | Kovian | priorita vysoká | import"
+    assert [label for label, _value, _under in stats(card)] == ["Výskyty (7 d)", "Naposledy"]
+    assert content(card)["body"][1]["color"] == "Accent"
     incident = store.incident(incident_id)
     assert incident is not None
     assert (incident["decision"], incident["decision_ticket"]) == ("rejected", "KOVIAN-SCOUT-4")
@@ -286,7 +468,7 @@ def test_commands_take_the_id_from_the_card(
 
     assert scout(path, "propose", "SCOUT-1", "--no-send", "--card") == 0
     printed = json.loads(capsys.readouterr().out)
-    assert content(printed)["body"][-1]["text"] == "SCOUT-1 · import"
+    assert meta(printed).startswith("SCOUT-1 | ")
     assert calls.drafts == []
     assert calls.posts == []
     with pytest.raises(SystemExit):
@@ -327,12 +509,15 @@ def test_a_metric_problem_counts_its_incidents_and_dates_the_current_one(tmp_pat
         earlier = store.open(finding, start)
         store.resolve(earlier, start + timedelta(minutes=5))
     current = T0 + timedelta(minutes=20)
-    card = card_for(config, store, store.open(finding, current))
-    shown = texts(content(card)["body"])
-    assert "4 výskyty" in shown
-    assert "za 7 dní, 2 dnes" in shown
-    assert f"od {teams._when(current.astimezone())}" in shown
-    assert not any(text.startswith("Zasažené") for text in shown)
+    incident_id = store.open(finding, current)
+    card = card_for(config, store, incident_id)
+    assert stats(card) == [("Výskyty (7 d)", "4", ""), ("Naposledy", *moment(current))]
+    assert not any(text.startswith("Zasažené") for text in texts(content(card)["body"]))
+    incident = store.incident(incident_id)
+    assert incident is not None
+    now = T0 + timedelta(hours=1)
+    reach = teams.scope(incident, cli._related_history(store, incident, now, 7), now)
+    assert (reach.today, reach.since) == (2, iso(current))
 
 
 def test_a_metric_problem_ignores_members_stored_by_older_versions(tmp_path: Path):
@@ -346,9 +531,9 @@ def test_a_metric_problem_ignores_members_stored_by_older_versions(tmp_path: Pat
     legacy = json.dumps({"i1 / n": iso(T0 - timedelta(days=1))})
     with store.db:
         store.db.execute("UPDATE incidents SET members = ?", (legacy,))
-    shown = texts(content(card_for(config, store, current))["body"])
-    assert "2 výskyty" in shown
-    assert not any(text.startswith("Zasažené") for text in shown)
+    card = card_for(config, store, current)
+    assert stats(card)[0] == ("Výskyty (7 d)", "2", "")
+    assert not any(text.startswith("Zasažené") for text in texts(content(card)["body"]))
 
 
 def test_records_date_from_the_first_check_and_from_incidents_without_records(tmp_path: Path):
@@ -363,9 +548,10 @@ def test_records_date_from_the_first_check_and_from_incidents_without_records(tm
     incident = store.incident(incident_id)
     assert incident is not None
     assert json.loads(incident["members"]) == {"C1": "2026-11-03T12:00:00+00:00"}
-    shown = texts(content(card_for(config, store, incident_id))["body"])
-    assert "1 záznam" in shown
-    assert f"od {teams._when((T0 - timedelta(hours=2)).astimezone())}" in shown
+    assert stats(card_for(config, store, incident_id))[0] == ("Záznamy (7 d)", "1", "")
+    now = T0 + timedelta(hours=1)
+    reach = teams.scope(incident, cli._related_history(store, incident, now, 7), now, True)
+    assert reach.since == iso(T0 - timedelta(hours=2))
 
 
 def test_a_card_too_big_for_teams_goes_without_the_logo(
@@ -377,11 +563,12 @@ def test_a_card_too_big_for_teams_goes_without_the_logo(
     store = Store(config.state_path)
     incident_id = store.open(IMPORT, T0)
     with_logo = card_for(config, store, incident_id)
-    assert len(content(with_logo)["body"][0]["columns"]) == 3
+    assert image(with_logo) is not None
     assert teams.card_bytes(with_logo) < teams.CARD_MAX_BYTES
     monkeypatch.setattr(teams, "CARD_MAX_BYTES", teams.card_bytes(with_logo) - 1)
     plain = card_for(config, store, incident_id)
-    assert len(content(plain)["body"][0]["columns"]) == 2
+    assert image(plain) is None
+    assert meta(plain) == meta(with_logo)
     assert "SCOUT-1: logo left out" in capsys.readouterr().err
 
 

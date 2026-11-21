@@ -196,7 +196,9 @@ def test_proposals_wait_for_lasting_or_recurring_problems(config_path: Path, cal
     assert Proposal.from_json(incident["proposal"]) == PROPOSAL
     (card,) = calls.posts
     content = card["attachments"][0]["content"]
-    assert content["body"][1]["text"] == "Shop A: disk runs full"
+    assert content["body"][0]["columns"][0]["items"][0]["text"].startswith(
+        "[Shop A: disk runs full](http://127.0.0.1:8766/incidents/"
+    )
     buttons_at = next(
         index for index, item in enumerate(content["body"]) if item.get("type") == "ActionSet"
     )

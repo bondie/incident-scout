@@ -10,10 +10,9 @@ import sqlite3
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -28,15 +27,25 @@ GROWTH_WINDOW = timedelta(hours=3)
 LOGO_MAX_BYTES = 18 * 1024
 CARD_MAX_BYTES = 27 * 1024  # Teams refuses a card of about 28 KB
 LOGO_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
-PRIORITY_COLOURS = {"medium": "Warning", "high": "Attention", "critical": "Attention"}
-SEVERITY_STYLES = {"critical": "attention", "warning": "warning", "info": "accent"}
-SUMMARY_MAX_CHARS = 1500
+LEVEL_COLOURS = {
+    "critical": "Attention",
+    "warning": "Warning",
+    "info": "Accent",
+    "resolved": "Good",
+}
+STATUS_COLOURS = {"status_lasts": "Warning", "status_resolved": "Good"}
+MARKER = "\u258d"
+TITLE_MAX_CHARS = 200
+DETAIL_MAX_CHARS = 200
 DIAGNOSIS_MAX_CHARS = 800
-PRAGUE = ZoneInfo("Europe/Prague")
 _SENTENCE_END = re.compile(
     r"(?<=[.!?])(?<!\bnapř\.)(?<!\btzv\.)(?<!\bč\.)(?<!\bresp\.)(?<!\be\.g\.)(?<!\bi\.e\.)"
     r"\s+(?=[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ])"
 )
+_RECORD_COUNT = re.compile(r"(\d+)\s*\u00d7")
+_LIST_START = re.compile(r"^(\s*\d+)\. ", re.MULTILINE)
+_LINK_TEXT = str.maketrans({"[": "\\[", "]": "\\]", "(": "\\(", ")": "\\)"})
+_LINK_URL = str.maketrans({"(": "%28", ")": "%29", " ": "%20"})
 
 LABELS: dict[str, dict[str, str]] = {
     "English": {
@@ -51,7 +60,6 @@ LABELS: dict[str, dict[str, str]] = {
         "critical": "Critical",
         "ticket": "Ticket",
         "cause": "Likely cause",
-        "cause_short": "Cause",
         "approve_ticket": "Approve the ticket",
         "reject_with_reason": "Reject with a reason",
         "decision_reason": "Reason",
@@ -66,25 +74,24 @@ LABELS: dict[str, dict[str, str]] = {
         "reason": "Why",
         "diagnosis": "Diagnosis",
         "affected": "Affected",
-        "badge_recurs_grows": "🔁 Recurs, growing",
-        "badge_recurs": "🔁 Recurs",
-        "badge_grows": "📈 Growing",
-        "badge_lasts": "⏳ Ongoing",
-        "badge_resolved": "✅ Resolved",
-        "record": "record|records|records",
-        "occurrence": "occurrence|occurrences|occurrences",
-        "day": "day|days|days",
-        "window": "in {days} {day}, {today} today",
-        "growing": "growing: +{new} in the last 3 h",
-        "since": "since {when}",
-        "last_seen": "last {when}",
-        "resolved_at": "resolved {when}",
-        "severity_critical": "🔴 Critical",
-        "severity_warning": "🟠 Warning",
-        "severity_info": "🔵 Info",
-        "first_seen": "first seen {when}",
-        "lasted": "lasted {duration}",
-        "confidence": "Confidence",
+        "status_recurs_grows": "Recurs, growing",
+        "status_recurs": "Recurs",
+        "status_grows": "Growing",
+        "status_lasts": "Ongoing",
+        "status_resolved": "Resolved",
+        "level_critical": "Critical",
+        "level_warning": "Warning",
+        "level_info": "Info",
+        "level_resolved": "Resolved",
+        "records": "Records",
+        "occurrences": "Occurrences",
+        "window": "{unit} ({days} d)",
+        "started": "Started",
+        "ended": "Ended",
+        "duration": "Duration",
+        "last_seen": "Last seen",
+        "cause_note": "Cause: {cause}",
+        "confidence_note": " (confidence {confidence})",
     },
     "Czech": {
         "create_ticket": "Navrhuji založit ticket",
@@ -98,7 +105,6 @@ LABELS: dict[str, dict[str, str]] = {
         "critical": "Kritická",
         "ticket": "Ticket",
         "cause": "Pravděpodobná příčina",
-        "cause_short": "Příčina",
         "approve_ticket": "Schválit ticket",
         "reject_with_reason": "Zamítnout s důvodem",
         "decision_reason": "Důvod",
@@ -113,34 +119,38 @@ LABELS: dict[str, dict[str, str]] = {
         "reason": "Proč",
         "diagnosis": "Diagnóza",
         "affected": "Zasažené",
-        "badge_recurs_grows": "🔁 Opakuje se, přibývá",
-        "badge_recurs": "🔁 Opakuje se",
-        "badge_grows": "📈 Přibývá",
-        "badge_lasts": "⏳ Trvá",
-        "badge_resolved": "✅ Vyřešeno",
-        "record": "záznam|záznamy|záznamů",
-        "occurrence": "výskyt|výskyty|výskytů",
-        "day": "den|dny|dní",
-        "window": "za {days} {day}, {today} dnes",
-        "growing": "přibývá: +{new} za poslední 3 h",
-        "since": "od {when}",
-        "last_seen": "naposledy {when}",
-        "resolved_at": "vyřešeno {when}",
-        "severity_critical": "🔴 Kritický",
-        "severity_warning": "🟠 Varování",
-        "severity_info": "🔵 Informace",
-        "first_seen": "poprvé zaznamenáno {when}",
-        "lasted": "trvalo {duration}",
-        "confidence": "Jistota",
+        "status_recurs_grows": "Opakuje se, přibývá",
+        "status_recurs": "Opakuje se",
+        "status_grows": "Přibývá",
+        "status_lasts": "Trvá",
+        "status_resolved": "Vyřešeno",
+        "level_critical": "Kritický",
+        "level_warning": "Varování",
+        "level_info": "Informace",
+        "level_resolved": "Vyřešeno",
+        "records": "Záznamy",
+        "occurrences": "Výskyty",
+        "window": "{unit} ({days} d)",
+        "started": "Začátek",
+        "ended": "Konec",
+        "duration": "Trvání",
+        "last_seen": "Naposledy",
+        "cause_note": "Příčina: {cause}",
+        "confidence_note": " (jistota {confidence})",
     },
 }
 
 
 @dataclass(frozen=True)
 class Header:
+    """`shop` is the name shown, `key` the shop label or var a summary may start with, and
+    `context` the shared source an affected shop was found in (Orchesty)."""
+
     shop: str
     title: str
     logo: str | None = None
+    key: str = ""
+    context: str = ""
 
 
 @dataclass(frozen=True)
@@ -161,6 +171,15 @@ class Scope:
     @property
     def growing(self) -> bool:
         return self.new > 0
+
+
+@dataclass(frozen=True)
+class Stat:
+    """A narrow column at the right of the card: a label above a value, maybe a date under it."""
+
+    label: str
+    value: str
+    under: str = ""
 
 
 def labels(language: str) -> dict[str, str]:
@@ -220,20 +239,25 @@ def proposal_card(
     links: Mapping[str, str],
     language: str = "English",
 ) -> dict[str, Any]:
+    """One row like an issue in Sentry's list, then the cause and the decision buttons."""
     text = labels(language)
     ref = short_id(incident["id"])
-    covered = proposal.recommendation == "existing_ticket" and bool(proposal.existing_ticket)
-    parts = (
-        _covered(proposal, links, text)
-        if covered
-        else _full(incident, proposal, reach, days, links, text)
-    )
-    footer = f"{ref} · {incident['rule']}"
-    body = [
-        _header(header, incident, reach, text),
-        *parts,
-        {"type": "TextBlock", "text": footer, "size": "Small", "isSubtle": True, "wrap": True},
+    status = _status(incident, reach)
+    colour = STATUS_COLOURS.get(status, "Attention")
+    priority = f"{text['priority_note']} {text.get(proposal.priority, proposal.priority).lower()}"
+    unit = text["records" if reach.members else "occurrences"]
+    stats = [
+        Stat(text["window"].format(unit=unit, days=days), str(reach.count)),
+        _moment(text["last_seen"], incident["resolved_at"] or incident["last_seen"]),
     ]
+    meta = [ref, (text[status], colour), header.shop, header.context, priority, incident["rule"]]
+    title = _link(proposal.title, links["detail"])
+    body = [_row(title, _sentence(proposal.reason), colour, _meta(header, meta), stats)]
+    covered = proposal.recommendation == "existing_ticket" and bool(proposal.existing_ticket)
+    if covered:
+        body += _covered(proposal, links, text)
+    if not covered:
+        body += _full(incident, proposal, reach, links, text)
     card = _message(body, f"🎫 {ref} · {proposal.title}")
     if header.logo and card_bytes(card) > CARD_MAX_BYTES:
         print(f"{ref}: logo left out, the card would exceed what Teams accepts", file=sys.stderr)
@@ -252,17 +276,27 @@ def incident_card(
     """An opened incident with its diagnosis when the check made one, or a short resolved note."""
     text = labels(language)
     resolved = event.kind == "resolved"
-    style = "good" if resolved else SEVERITY_STYLES.get(event.severity, "default")
-    badge = text["badge_resolved"] if resolved else text[f"severity_{event.severity}"]
-    parts = (
-        _resolved(event, incident, text) if resolved else _opened(event, incident, diagnosis, text)
-    )
-    body = [_header_row(header, style, badge), *parts]
+    level = "resolved" if resolved else event.severity
+    colour = LEVEL_COLOURS.get(level, "Default")
+    summary = incident["summary"] if resolved and incident is not None else event.message
+    shops = (header.key, header.shop, header.context)
+    title, message = header.title, without_shop(summary or event.title, shops)
+    if not title:
+        title, message = headline(summary or event.title, shops)
+    meta: list[str | tuple[str, str]] = [
+        (text.get(f"level_{level}", level), colour),
+        header.shop,
+        header.context,
+    ]
     if incident is not None:
-        footer = f"{short_id(incident['id'])} · {incident['rule']}"
-        body.append(
-            {"type": "TextBlock", "text": footer, "size": "Small", "isSubtle": True, "wrap": True}
-        )
+        meta = [short_id(incident["id"]), *meta, incident["rule"]]
+    stats = _incident_stats(event, incident, text, resolved)
+    body = [_row(_link(title, event.url), message, colour, _meta(header, meta), stats)]
+    if diagnosis is not None and not resolved:
+        body.append(_note(_diagnosis(diagnosis, text)))
+    if event.url:
+        source = {"type": "Action.OpenUrl", "title": text["source"], "url": event.url}
+        body.append({"type": "ActionSet", "actions": [source]})
     card = _message(body, f"{event.title}: {_clip(event.message, 200)}")
     if header.logo and card_bytes(card) > CARD_MAX_BYTES:
         print(
@@ -273,79 +307,197 @@ def incident_card(
     return card
 
 
+def headline(summary: str, shops: Sequence[str] = ()) -> tuple[str, str]:
+    """The problem sentence and its detail, `shop: X (3 chyb) - why` gives X and `3 chyb - why`."""
+    text = without_shop(summary, shops)
+    head, opening, rest = text.partition(" (")
+    if not opening or not head.strip():
+        return text, ""
+    inside, _closing, tail = rest.partition(")")
+    return head.strip(), f"{inside}{tail}".strip()
+
+
+def without_shop(summary: str, shops: Sequence[str] = ()) -> str:
+    """The summary without its leading `shop: `, which the card already names."""
+    text = summary.strip()
+    for shop in shops:
+        if shop and text.lower().startswith(f"{shop.lower()}: "):
+            return text[len(shop) + 2 :].lstrip()
+    return text
+
+
 def stored_diagnosis(incident: sqlite3.Row) -> Diagnosis | None:
     if not incident["diagnosis"]:
         return None
     return Diagnosis(**json.loads(incident["diagnosis"]))
 
 
-def _opened(
-    event: Event,
-    incident: sqlite3.Row | None,
-    diagnosis: Diagnosis | None,
-    text: Mapping[str, str],
-) -> list[dict[str, Any]]:
-    body: list[dict[str, Any]] = [
-        {
+def card_bytes(card: Mapping[str, Any]) -> int:
+    """The size of the card as `post` sends it."""
+    return len(json.dumps(card, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def post(
+    url: str, payload: Mapping[str, Any], transport: httpx.BaseTransport | None = None
+) -> None:
+    with httpx.Client(transport=transport, timeout=30) as client:
+        response = client.post(url, json=payload)
+    if response.status_code >= 400:
+        raise RuntimeError(f"Teams webhook answered {response.status_code}: {response.text[:200]}")
+
+
+def _row(
+    title: str, message: str, colour: str, meta: dict[str, Any], stats: Sequence[Stat]
+) -> dict[str, Any]:
+    """Title, message with a level marker and a meta line on the left, the stats on the right."""
+    left: list[dict[str, Any]] = [
+        {"type": "TextBlock", "text": title, "size": "Medium", "weight": "Bolder", "wrap": True}
+    ]
+    if message:
+        marker = {"type": "TextBlock", "text": MARKER, "color": colour, "weight": "Bolder"}
+        line = {
             "type": "TextBlock",
-            "text": _clip(event.message or event.title, SUMMARY_MAX_CHARS),
-            "size": "Medium",
-            "weight": "Bolder",
+            "text": _unlisted(_clip(message, DETAIL_MAX_CHARS)),
             "wrap": True,
         }
-    ]
-    if incident is not None:
-        body.append(_small(text["first_seen"].format(when=_when(_prague(incident["opened_at"])))))
-    if diagnosis is not None:
-        body.append(_diagnosis(diagnosis, text))
-    if event.url:
-        source = {"type": "Action.OpenUrl", "title": text["source"], "url": event.url}
-        body.append({"type": "ActionSet", "actions": [source]})
-    return body
+        left.append(
+            {
+                "type": "ColumnSet",
+                "spacing": "Small",
+                "columns": [
+                    {"type": "Column", "width": "auto", "items": [marker]},
+                    {"type": "Column", "width": "stretch", "spacing": "Small", "items": [line]},
+                ],
+            }
+        )
+    left.append(meta | {"spacing": "Small"})
+    columns = [{"type": "Column", "width": "stretch", "items": left}]
+    if stats:
+        items = [item for number, stat in enumerate(stats) for item in _stat(stat, number)]
+        columns.append(
+            {
+                "type": "Column",
+                "width": "auto",
+                "spacing": "Large",
+                "verticalContentAlignment": "Center",
+                "items": items,
+            }
+        )
+    return {"type": "ColumnSet", "columns": columns}
 
 
-def _diagnosis(diagnosis: Diagnosis, text: Mapping[str, str]) -> dict[str, Any]:
+def _stat(stat: Stat, number: int) -> list[dict[str, Any]]:
+    label = {"type": "TextBlock", "text": stat.label, "size": "Small", "isSubtle": True}
     items: list[dict[str, Any]] = [
-        {"type": "TextBlock", "text": text["diagnosis"], "weight": "Bolder"},
-        {
-            "type": "TextBlock",
-            "text": _clip(diagnosis.summary, DIAGNOSIS_MAX_CHARS),
-            "wrap": True,
-            "spacing": "Small",
-        },
+        label | ({"spacing": "Medium"} if number else {}),
+        {"type": "TextBlock", "text": stat.value, "weight": "Bolder", "spacing": "None"},
     ]
-    if diagnosis.likely_cause:
-        items += [
-            {"type": "TextBlock", "text": text["cause"], "weight": "Bolder", "spacing": "Medium"},
+    if stat.under:
+        items.append(
             {
                 "type": "TextBlock",
-                "text": _clip(diagnosis.likely_cause, DIAGNOSIS_MAX_CHARS),
-                "wrap": True,
-                "spacing": "Small",
-            },
-        ]
-    if diagnosis.confidence:
-        confidence = text.get(diagnosis.confidence, diagnosis.confidence)
-        items.append(
-            _small(f"{text['confidence']}: {confidence}") | {"isSubtle": True, "spacing": "Small"}
+                "text": stat.under,
+                "size": "Small",
+                "isSubtle": True,
+                "spacing": "None",
+            }
         )
-    return {"type": "Container", "style": "emphasis", "items": items}
+    return items
 
 
-def _resolved(
-    event: Event, incident: sqlite3.Row | None, text: Mapping[str, str]
-) -> list[dict[str, Any]]:
-    if incident is None or not incident["resolved_at"]:
-        return [
-            {"type": "TextBlock", "text": _clip(event.message, SUMMARY_MAX_CHARS), "wrap": True}
-        ]
-    opened, ended = _prague(incident["opened_at"]), _prague(incident["resolved_at"])
-    lasted = text["lasted"].format(duration=duration((ended - opened).total_seconds()))
-    when = text["resolved_at"].format(when=_later(ended, opened))
-    return [
-        {"type": "TextBlock", "text": _clip(incident["summary"], SUMMARY_MAX_CHARS), "wrap": True},
-        _small(f"{lasted} · {when}"),
-    ]
+def _meta(header: Header, parts: Sequence[str | tuple[str, str]]) -> dict[str, Any]:
+    """`SCOUT-1 | Critical | Shop | rule`, only the status coloured, after the shop's logo."""
+    runs: list[dict[str, Any]] = []
+    plain = ""
+    for part in parts:
+        if not part:
+            continue
+        plain += " | " if runs or plain else ""
+        if isinstance(part, str):
+            plain += part
+            continue
+        if plain:
+            runs.append(_run(plain))
+        plain = ""
+        word, colour = part
+        runs.append(_run(word) | {"color": colour, "weight": "Bolder", "isSubtle": False})
+    if plain:
+        runs.append(_run(plain))
+    line = {"type": "RichTextBlock", "inlines": runs}
+    if not header.logo:
+        return line
+    image = {"type": "Image", "url": header.logo, "width": "16px", "altText": header.shop}
+    return {
+        "type": "ColumnSet",
+        "columns": [
+            {"type": "Column", "width": "auto", "items": [image]},
+            {
+                "type": "Column",
+                "width": "stretch",
+                "spacing": "Small",
+                "verticalContentAlignment": "Center",
+                "items": [line],
+            },
+        ],
+    }
+
+
+def _run(text: str) -> dict[str, Any]:
+    return {"type": "TextRun", "text": text, "size": "Small", "isSubtle": True}
+
+
+def _incident_stats(
+    event: Event, incident: sqlite3.Row | None, text: Mapping[str, str], resolved: bool
+) -> list[Stat]:
+    if incident is None:
+        return []
+    if resolved and incident["resolved_at"]:
+        opened = datetime.fromisoformat(incident["opened_at"])
+        ended = datetime.fromisoformat(incident["resolved_at"])
+        lasted = Stat(text["duration"], duration((ended - opened).total_seconds()))
+        return [lasted, _moment(text["ended"], incident["resolved_at"])]
+    stats = [_moment(text["started"], incident["opened_at"])]
+    count = _records(event.message, incident)
+    if count:
+        stats.append(Stat(text["records"], str(count)))
+    return stats
+
+
+def _moment(label: str, moment: str) -> Stat:
+    """Teams writes the date and time in the reader's language and time zone."""
+    exact = _rfc3339(moment)
+    return Stat(label, f"{{{{TIME({exact})}}}}", f"{{{{DATE({exact}, SHORT)}}}}")
+
+
+def _rfc3339(moment: str) -> str:
+    """Teams expands DATE and TIME only for seconds with a zone, else it shows the raw text."""
+    parsed = datetime.fromisoformat(moment)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.replace(microsecond=0).isoformat()
+
+
+def _records(summary: str, incident: sqlite3.Row) -> int:
+    members = json.loads(incident["members"] or "{}")
+    if members:
+        return len(members)
+    found = _RECORD_COUNT.search(summary)
+    return int(found.group(1)) if found else 0
+
+
+def _diagnosis(diagnosis: Diagnosis, text: Mapping[str, str]) -> str:
+    """The cause only: the model's summary mostly restates the problem the card already names."""
+    cause = text["cause_note"].format(
+        cause=_clip(diagnosis.likely_cause or diagnosis.summary, DIAGNOSIS_MAX_CHARS)
+    )
+    if not diagnosis.confidence:
+        return cause
+    confidence = text.get(diagnosis.confidence, diagnosis.confidence).lower()
+    return cause + text["confidence_note"].format(confidence=confidence)
+
+
+def _note(line: str) -> dict[str, Any]:
+    return {"type": "TextBlock", "text": _unlisted(line), "size": "Small", "wrap": True}
 
 
 def _message(body: list[dict[str, Any]], fallback: str) -> dict[str, Any]:
@@ -371,56 +523,20 @@ def _full(
     incident: sqlite3.Row,
     proposal: Proposal,
     reach: Scope,
-    days: int,
     links: Mapping[str, str],
     text: Mapping[str, str],
 ) -> list[dict[str, Any]]:
-    body: list[dict[str, Any]] = [
-        {
-            "type": "TextBlock",
-            "text": proposal.title,
-            "size": "Large",
-            "weight": "Bolder",
-            "wrap": True,
-        },
-        {"type": "TextBlock", "text": _sentence(proposal.reason), "wrap": True},
-        _numbers(incident, proposal, reach, days, text),
-    ]
-    if len(reach.members) > 1:
-        affected = f"{text['affected']}: {capped(reach.members)}"
-        body.append({"type": "TextBlock", "text": affected, "size": "Small", "wrap": True})
+    body: list[dict[str, Any]] = []
     cause = _cause(incident)
     if cause:
-        body.append(
-            {
-                "type": "Container",
-                "style": "emphasis",
-                "items": [
-                    {"type": "TextBlock", "text": text["cause_short"], "weight": "Bolder"},
-                    {
-                        "type": "TextBlock",
-                        "text": _sentence(cause),
-                        "wrap": True,
-                        "spacing": "Small",
-                    },
-                ],
-            }
-        )
-    body.append(
-        {
-            "type": "TextBlock",
-            "text": _recommendation(proposal, text),
-            "size": "Medium",
-            "weight": "Bolder",
-            "color": "Accent",
-            "wrap": True,
-            "spacing": "Large",
-        }
-    )
-    body.append(
-        {"type": "ActionSet", "actions": _actions(incident, links, text), "spacing": "Small"}
-    )
-    return body
+        body.append(_note(text["cause_note"].format(cause=_sentence(cause))))
+    if len(reach.members) > 1:
+        body.append(_note(f"{text['affected']}: {capped(reach.members)}") | {"isSubtle": True})
+    return [
+        *body,
+        _recommendation(proposal, text),
+        {"type": "ActionSet", "actions": _actions(incident, links, text), "spacing": "Small"},
+    ]
 
 
 def _covered(
@@ -429,127 +545,35 @@ def _covered(
     """A problem an existing ticket covers needs no decision, only a way to the detail."""
     detail = {"type": "Action.OpenUrl", "title": text["detail"], "url": links["detail"]}
     return [
-        {
-            "type": "TextBlock",
-            "text": _recommendation(proposal, text),
-            "weight": "Bolder",
-            "wrap": True,
-        },
-        {"type": "TextBlock", "text": proposal.title, "wrap": True, "spacing": "None"},
-        {"type": "TextBlock", "text": _sentence(proposal.reason), "size": "Small", "wrap": True},
-        {"type": "ActionSet", "actions": [detail]},
+        _recommendation(proposal, text),
+        {"type": "ActionSet", "actions": [detail], "spacing": "Small"},
     ]
 
 
-def card_bytes(card: Mapping[str, Any]) -> int:
-    """The size of the card as `post` sends it."""
-    return len(json.dumps(card, ensure_ascii=False, separators=(",", ":")).encode())
-
-
-def post(
-    url: str, payload: Mapping[str, Any], transport: httpx.BaseTransport | None = None
-) -> None:
-    with httpx.Client(transport=transport, timeout=30) as client:
-        response = client.post(url, json=payload)
-    if response.status_code >= 400:
-        raise RuntimeError(f"Teams webhook answered {response.status_code}: {response.text[:200]}")
-
-
-def _header(
-    header: Header, incident: sqlite3.Row, reach: Scope, text: Mapping[str, str]
-) -> dict[str, Any]:
-    style, badge = _badge(incident, reach)
-    return _header_row(header, style, text[badge])
-
-
-def _header_row(header: Header, style: str, badge: str) -> dict[str, Any]:
-    columns: list[dict[str, Any]] = []
-    if header.logo:
-        image = {"type": "Image", "url": header.logo, "width": "32px", "altText": header.shop}
-        columns.append(
-            {
-                "type": "Column",
-                "width": "auto",
-                "verticalContentAlignment": "Center",
-                "items": [image],
-            }
-        )
-    names: list[dict[str, Any]] = []
-    if header.shop and not header.logo:
-        names.append(
-            {"type": "TextBlock", "text": header.shop, "weight": "Bolder", "size": "Medium"}
-        )
-    names.append({"type": "TextBlock", "text": header.title, "spacing": "None", "wrap": True})
-    columns.append(
-        {
-            "type": "Column",
-            "width": "stretch",
-            "verticalContentAlignment": "Center",
-            "items": names,
-        }
-    )
-    status = {"type": "TextBlock", "text": badge, "weight": "Bolder", "size": "Small"}
-    columns.append(
-        {
-            "type": "Column",
-            "width": "auto",
-            "verticalContentAlignment": "Center",
-            "items": [{"type": "Container", "style": style, "items": [status]}],
-        }
-    )
-    return {"type": "ColumnSet", "columns": columns}
-
-
-def _badge(incident: sqlite3.Row, reach: Scope) -> tuple[str, str]:
-    if incident["resolved_at"]:
-        return "good", "badge_resolved"
-    if reach.recurs and reach.growing:
-        return "attention", "badge_recurs_grows"
-    if reach.recurs:
-        return "attention", "badge_recurs"
-    if reach.growing:
-        return "attention", "badge_grows"
-    return "warning", "badge_lasts"
-
-
-def _numbers(
-    incident: sqlite3.Row, proposal: Proposal, reach: Scope, days: int, text: Mapping[str, str]
-) -> dict[str, Any]:
-    unit = _plural(text, "record" if reach.members else "occurrence", reach.count)
-    count = {
-        "type": "TextBlock",
-        "text": f"{reach.count} {unit}",
-        "size": "Large",
-        "weight": "Bolder",
-        "color": "Attention" if reach.growing else "Default",
-    }
-    window = text["window"].format(days=days, day=_plural(text, "day", days), today=reach.today)
-    extent = [count, _small(window)]
-    if reach.growing:
-        extent.append(_small(text["growing"].format(new=reach.new)))
-    opened = datetime.fromisoformat(reach.since).astimezone()
-    last = "resolved_at" if incident["resolved_at"] else "last_seen"
-    ended = datetime.fromisoformat(incident[last]).astimezone()
-    duration = [
-        {"type": "TextBlock", "text": text["since"].format(when=_when(opened)), "weight": "Bolder"},
-        _small(text[last].format(when=_later(ended, opened))),
-    ]
-    priority = [
-        {
-            "type": "TextBlock",
-            "text": text.get(proposal.priority, proposal.priority),
-            "weight": "Bolder",
-            "color": PRIORITY_COLOURS.get(proposal.priority, "Default"),
-        },
-        _small(text["priority_note"]),
-    ]
+def _recommendation(proposal: Proposal, text: Mapping[str, str]) -> dict[str, Any]:
+    heading = text.get(proposal.recommendation, proposal.recommendation)
+    if proposal.recommendation == "existing_ticket" and proposal.existing_ticket:
+        heading = f"{heading}: {proposal.existing_ticket}"
     return {
-        "type": "ColumnSet",
-        "columns": [
-            {"type": "Column", "width": "stretch", "items": items}
-            for items in (extent, duration, priority)
-        ],
+        "type": "TextBlock",
+        "text": _unlisted(heading),
+        "weight": "Bolder",
+        "color": "Accent",
+        "wrap": True,
+        "spacing": "Medium",
     }
+
+
+def _status(incident: sqlite3.Row, reach: Scope) -> str:
+    if incident["resolved_at"]:
+        return "status_resolved"
+    if reach.recurs and reach.growing:
+        return "status_recurs_grows"
+    if reach.recurs:
+        return "status_recurs"
+    if reach.growing:
+        return "status_grows"
+    return "status_lasts"
 
 
 def _actions(
@@ -574,13 +598,6 @@ def _actions(
     return actions
 
 
-def _recommendation(proposal: Proposal, text: Mapping[str, str]) -> str:
-    heading = text.get(proposal.recommendation, proposal.recommendation)
-    if proposal.recommendation == "existing_ticket" and proposal.existing_ticket:
-        return f"{heading}: {proposal.existing_ticket}"
-    return heading
-
-
 def _cause(incident: sqlite3.Row) -> str:
     """The reviewed cause when a person corrected the diagnosis, else the diagnosis."""
     review = json.loads(incident["review"]) if incident["review"] else {}
@@ -591,43 +608,28 @@ def _cause(incident: sqlite3.Row) -> str:
     return Diagnosis(**json.loads(incident["diagnosis"])).likely_cause
 
 
+def _link(title: str, url: str | None) -> str:
+    title = _clip(title, TITLE_MAX_CHARS)
+    if not url:
+        return _unlisted(title)
+    return f"[{title.translate(_LINK_TEXT)}]({url.translate(_LINK_URL)})"
+
+
+def _unlisted(text: str) -> str:
+    # Teams reads "3. foo" at the start of a text block as a numbered list; NBSP stops that.
+    return _LIST_START.sub("\\1.\u00a0", text)
+
+
 def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
 
 
-def _prague(moment: str) -> datetime:
-    return datetime.fromisoformat(moment).astimezone(PRAGUE)
-
-
 def _sentence(text: str) -> str:
     return _SENTENCE_END.split(text.strip(), maxsplit=1)[0]
-
-
-def _small(text: str) -> dict[str, Any]:
-    return {"type": "TextBlock", "text": text, "size": "Small", "spacing": "None", "wrap": True}
-
-
-def _plural(text: Mapping[str, str], key: str, count: int) -> str:
-    one, few, many = text[key].split("|")
-    if count == 1:
-        return one
-    if 2 <= count <= 4:
-        return few
-    return many
 
 
 def _today(moments: Sequence[str], now: datetime) -> int:
     day = now.astimezone().date()
     return sum(1 for moment in moments if datetime.fromisoformat(moment).astimezone().date() == day)
-
-
-def _when(moment: datetime) -> str:
-    return f"{moment.day}. {moment.month}. {moment:%H:%M}"
-
-
-def _later(moment: datetime, opened: datetime) -> str:
-    if moment.date() == opened.date():
-        return f"{moment:%H:%M}"
-    return _when(moment)

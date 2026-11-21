@@ -48,7 +48,7 @@ target-version = "py311"
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RET", "C4", "PT", "PTH", "RUF", "S", "N", "ASYNC"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106"]
+"tests/**" = ["S101", "S105", "S106", "RUF001"]  # real Czech summaries carry × and –
 
 [tool.mypy]
 strict = true
