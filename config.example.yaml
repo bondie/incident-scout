@@ -30,6 +30,12 @@ source:
 #     profile: monitoring-shop-a
 #     region: eu-central-1
 #     vars: {shop: shop-a, shop_title: Shop A, logs: /ecs/shop-a}   # shop_title: on ticket cards
+#   shop-a-logs:                       # log documents in Elasticsearch, for elasticsearch rules
+#     type: elasticsearch
+#     url: http://elasticsearch:9200
+#     index: 'shop-a-*'                # a rule's own `index` overrides it
+#     # headers: {Authorization: "ApiKey ${ES_API_KEY}"}
+#     vars: {shop: shop-a}
 
 # $name placeholders in queries, summaries and URLs.
 vars:
@@ -139,6 +145,30 @@ rules:
   #   record_labels: [code]
   #   hold: 2h
   #   summary: '$shop: {type} import failed ({count}x: {code}) - {reason}'
+  # Elasticsearch: matching documents over the last `since` (default 5m), per `group_by`
+  # (`node.keyword` becomes {node}) or in total. `query` is a query clause; `time_field`
+  # defaults to timestamp. Needs `above` or `below`.
+  # - name: erp-link-errors
+  #   kind: elasticsearch
+  #   source: shop-a-logs
+  #   query:
+  #     bool:
+  #       filter:
+  #         - term: {level.keyword: error}
+  #         - terms: {message.keyword: ['Download data from ERP', 'Save data to erp [response]']}
+  #   group_by: node.keyword
+  #   since: 30m
+  #   above: 2
+  #   summary: '$shop: {node} failed to talk to the ERP {value:.0f}x in 30 min'
+  # TLS certificates of any host:port, read from the handshake without verification: days
+  # until notAfter, negative once expired; an unreachable target is -9999 with {error}.
+  # It ignores its source's telemetry; pick a source that opens without a network call.
+  # - name: erp-certificate
+  #   kind: tls
+  #   source: shop-a-logs
+  #   query: ['erp.example.com:9093']
+  #   below: 14
+  #   summary: '{target}: valid until {not_after}{error} ({value:.1f} days)'
 
 # Optional: diagnose every new incident with a local model (Ollama) and follow up on its
 # notification. Evidence queries see the incident's labels as $label and the evidence

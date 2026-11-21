@@ -47,8 +47,9 @@ cp config.example.yaml ~/.config/incident-scout/config.yaml
 ```
 
 The telemetry comes from the standard HTTP APIs (`type: http`), from an MCP server that
-wraps them (`type: mcp`), or from Amazon CloudWatch (`type: cloudwatch`, see
-[below](#amazon-cloudwatch)). If the MCP server is already registered in Claude Code,
+wraps them (`type: mcp`), from Amazon CloudWatch (`type: cloudwatch`, see
+[below](#amazon-cloudwatch)), or from Elasticsearch (`type: elasticsearch`, see
+[below](#elasticsearch-and-tls-certificates)). If the MCP server is already registered in Claude Code,
 `claude_mcp_server: <name>` reuses its URL and credentials, so no token is copied into
 another file.
 
@@ -97,6 +98,8 @@ rules:
 | `alertmanager` | active, unsilenced alerts | `match` filters labels by regex, severity comes from the alert's label; on a CloudWatch source, alarms in the ALARM state |
 | `cloudwatch` | Metrics Insights query or metric math, last complete period | `since` is the period; `above` or `below` keeps only the problems |
 | `logs_insights` | Logs Insights query over the last `since` | Name the number `value`; `filter` after `stats` keeps only the problems |
+| `elasticsearch` | documents matching a query over the last `since`, in total or per `group_by` | Needs an `elasticsearch` source; `above` or `below` keeps only the problems |
+| `tls` | days until the certificate of each `host:port` expires | Works on any source; `below` keeps only the problems |
 
 `vars` defines `$name` placeholders, so a label selector shared by many rules is written once.
 
@@ -184,6 +187,59 @@ alarms, Logs Insights queries on the log groups you name, and the ECS service li
 deployments, nothing else. Metric rules are cheap; a Logs Insights rule scans its whole
 window on every check, so keep log rules few and windows short.
 
+## Elasticsearch and TLS certificates
+
+An `elasticsearch` source counts log documents, for example errors of an integration that
+writes its logs to Elasticsearch. The rule's `query` is an Elasticsearch query clause, written
+as YAML or as JSON text; it is combined with a range filter on `time_field` (default
+`timestamp`) over the last `since` (default `5m`). With `group_by`, a terms aggregation (up to
+50 buckets) yields one series per value, labelled by the field without `.keyword`
+(`node.keyword` becomes `{node}`). Without it, the rule sees one series with the total, zero
+included, so `below: 1` can also say that logs stopped arriving. `index` on the rule overrides
+the source's.
+
+```yaml
+sources:
+  orchesty-logs: {type: elasticsearch, url: 'http://elasticsearch:9200', index: 'orchesty-*',
+                  vars: {shop: shop-a}}   # headers: {Authorization: ...} and timeout as for http
+
+rules:
+  - name: erp-link-errors
+    kind: elasticsearch
+    source: orchesty-logs
+    query:
+      bool:
+        filter:
+          - term: {level.keyword: error}
+          - terms: {message.keyword: ['Download data from ERP', 'Save data to erp [response]']}
+    group_by: node.keyword
+    since: 30m
+    above: 2
+    summary: '$shop: {node} failed to talk to the ERP {value:.0f}x in 30 min'
+```
+
+A `tls` rule reads the certificate of every `host:port` in its `query` (a list, or a comma or
+space separated string) straight from a TLS handshake, so it also covers ports no HTTP probe
+sees, such as a message broker. It does not verify the certificate, so an expired or
+self-signed one is still read. Each target is one series valued in days until `notAfter`,
+negative once it has expired, with the labels `target`, `subject` and `issuer` (common names),
+`not_after` and `error`. A target that cannot be reached within 10 s is valued -9999 and its
+`error` says why, so a `below` rule fires for it too; the other labels are then empty, so one
+summary fits both. Incidents are keyed by `target` unless `key_labels` says otherwise. The rule
+ignores its source's telemetry, but still runs inside that source's connection, so pick a
+source that opens without a network call (http or elasticsearch) or one you rely on anyway.
+
+```yaml
+  - name: erp-certificate
+    kind: tls
+    source: orchesty-logs
+    query: ['erp.example.com:9093', 'shop.example.com:443']
+    below: 14
+    summary: '{target}: valid until {not_after}{error} ({value:.1f} days)'
+```
+
+Both kinds need `above` or `below`; without a threshold every series would be a problem.
+
 ## How it behaves
 
 - **One notification per change.** An incident is opened when a rule has returned a problem
@@ -207,8 +263,8 @@ window on every check, so keep log rules few and windows short.
 
 `scout backtest` replays `promql` rules through range queries in daily chunks and groups the
 moments a rule fired into episodes. `cloudwatch` rules are replayed the same way, with their
-own period as the step and their threshold applied to every point; `logs_insights` rules
-cannot be replayed yet. It counts only episodes long enough to pass `for_runs`.
+own period as the step and their threshold applied to every point; `logs_insights`,
+`elasticsearch` and `tls` rules cannot be replayed yet. It counts only episodes long enough to pass `for_runs`.
 Some MCP servers let log queries look back only from "now", without setting a step. For
 those, `logql` rules are replayed in 12-hour chunks reached with LogQL `offset`, so the
 server's automatic step stays below the rule's window and short spikes are not stepped over.

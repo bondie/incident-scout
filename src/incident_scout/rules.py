@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import time
@@ -10,8 +11,12 @@ from typing import Any, Literal, cast
 from .models import SEVERITIES, Alert, Finding, Series, Severity
 from .sources.base import SourceError, Telemetry, parse_duration
 from .sources.cloudwatch import CloudWatchTelemetry
+from .sources.elasticsearch import ElasticsearchTelemetry
+from .sources.tls import certificate_series, parse_targets
 
-RuleKind = Literal["promql", "logql", "alertmanager", "cloudwatch", "logs_insights"]
+RuleKind = Literal[
+    "promql", "logql", "alertmanager", "cloudwatch", "logs_insights", "elasticsearch", "tls"
+]
 METRIC_DELAY = 60  # CloudWatch publishes a period's datapoint about a minute after it ends
 MERGED_SHOWN = 5
 _PLACEHOLDER = re.compile(r"\{(\w+)(?::([^}]*))?\}")
@@ -36,7 +41,8 @@ class Rule:
     are covered per problem. `hold` is how long an incident collects quietly before it is
     announced, so a burst of failures arrives as one notice.
     `title` names the problem on ticket cards; `shop` and `shop_title` default to the vars of
-    the rule's source.
+    the rule's source. `index`, `group_by` and `time_field` belong to elasticsearch rules,
+    whose query is the JSON of an Elasticsearch query clause.
     """
 
     name: str
@@ -61,6 +67,9 @@ class Rule:
     title: str = ""
     shop: str = ""
     shop_title: str = ""
+    index: str | None = None
+    group_by: str | None = None
+    time_field: str = "timestamp"
 
     def breached(self, value: float) -> bool:
         if self.above is not None and value <= self.above:
@@ -84,6 +93,8 @@ async def evaluate(rule: Rule, telemetry: Telemetry, now: float | None = None) -
 
 
 async def _series(rule: Rule, telemetry: Telemetry, now: float) -> Sequence[Series]:
+    if rule.kind == "tls":
+        return await certificate_series(parse_targets(rule.query), now)
     if rule.kind == "promql":
         return await telemetry.query(rule.query)
     if rule.kind == "logql":
@@ -94,12 +105,22 @@ async def _series(rule: Rule, telemetry: Telemetry, now: float) -> Sequence[Seri
         return await cloudwatch(telemetry).metrics(rule.query, end - window, end, window)
     if rule.kind == "logs_insights":
         return await cloudwatch(telemetry).log_query(rule.log_groups, rule.query, now - window, now)
+    if rule.kind == "elasticsearch":
+        return await elasticsearch(telemetry).count(
+            rule.index, json.loads(rule.query), window, now, rule.group_by, rule.time_field
+        )
     raise ValueError(f"Unknown rule kind {rule.kind!r}")
 
 
 def cloudwatch(telemetry: Telemetry) -> CloudWatchTelemetry:
     if not isinstance(telemetry, CloudWatchTelemetry):
         raise SourceError("cloudwatch and logs_insights queries need a cloudwatch source")
+    return telemetry
+
+
+def elasticsearch(telemetry: Telemetry) -> ElasticsearchTelemetry:
+    if not isinstance(telemetry, ElasticsearchTelemetry):
+        raise SourceError("elasticsearch queries need an elasticsearch source")
     return telemetry
 
 
