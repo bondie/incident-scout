@@ -1,10 +1,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, get_args
 
 Severity = Literal["info", "warning", "critical"]
 SEVERITIES: tuple[Severity, ...] = ("info", "warning", "critical")
+EventKind = Literal[
+    "opened",
+    "grew",
+    "resolved",
+    "diagnosed",
+    "diagnosis_failed",
+    "reviewed",
+    "proposed",
+    "approved",
+    "rejected",
+    "covered",
+    "blind",
+    "restored",
+    "rule_failing",
+    "rule_recovered",
+]
+EVENT_KINDS: tuple[str, ...] = get_args(EventKind)
 
 
 @dataclass(frozen=True)
@@ -50,22 +67,7 @@ class Finding:
 class Event:
     """A state change worth telling a human about."""
 
-    kind: Literal[
-        "opened",
-        "grew",
-        "resolved",
-        "diagnosed",
-        "diagnosis_failed",
-        "reviewed",
-        "proposed",
-        "approved",
-        "rejected",
-        "covered",
-        "blind",
-        "restored",
-        "rule_failing",
-        "rule_recovered",
-    ]
+    kind: EventKind
     severity: Severity
     title: str
     message: str

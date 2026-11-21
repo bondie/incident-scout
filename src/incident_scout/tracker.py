@@ -212,14 +212,14 @@ def _resolved(incident: sqlite3.Row, now: datetime) -> Event:
         "resolved",
         severity,
         f"✅ {incident['rule']} resolved",
-        f"{incident['summary']} (lasted {_duration(lasted.total_seconds())})",
+        f"{incident['summary']} (lasted {duration(lasted.total_seconds())})",
         group=incident["fingerprint"],
         url=incident["url"],
         incident_id=incident["id"],
     )
 
 
-def _duration(seconds: float) -> str:
+def duration(seconds: float) -> str:
     minutes = max(1, round(seconds / 60))
     if minutes < 60:
         return f"{minutes} min"

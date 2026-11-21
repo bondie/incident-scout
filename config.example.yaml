@@ -54,6 +54,8 @@ notify:
   # ntfy_url: https://ntfy.sh       # push to the ntfy app on your phone
   # ntfy_topic: ${NTFY_TOPIC}       # pick a long random topic or use a private server
   # ntfy_token: ${NTFY_TOKEN}
+  # teams_url: ${TEAMS_ALERTS_URL}  # a card per incident in a Teams channel (Workflows webhook)
+  # teams_kinds: [opened, resolved] # an opened card carries the diagnosis of the same check
   max_per_run: 5                    # more events than this collapse into one summary
 
 # A rule returns only what is wrong, like a Prometheus alerting rule. Summaries use

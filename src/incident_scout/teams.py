@@ -1,5 +1,5 @@
-"""Ticket proposals as Adaptive Cards in a Microsoft Teams channel, posted through a Workflows
-(Power Automate) webhook: "Post to a channel when a webhook request is received"."""
+"""Ticket proposals and incidents as Adaptive Cards in Microsoft Teams channels, posted through
+a Workflows (Power Automate) webhook: "Post to a channel when a webhook request is received"."""
 
 from __future__ import annotations
 
@@ -13,19 +13,26 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from .investigator import Diagnosis
+from .models import Event
 from .proposal import Proposal
 from .rules import capped
 from .state import iso, short_id
+from .tracker import duration
 
 GROWTH_WINDOW = timedelta(hours=3)
 LOGO_MAX_BYTES = 18 * 1024
 CARD_MAX_BYTES = 27 * 1024  # Teams refuses a card of about 28 KB
 LOGO_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 PRIORITY_COLOURS = {"medium": "Warning", "high": "Attention", "critical": "Attention"}
+SEVERITY_STYLES = {"critical": "attention", "warning": "warning", "info": "accent"}
+SUMMARY_MAX_CHARS = 1500
+DIAGNOSIS_MAX_CHARS = 800
+PRAGUE = ZoneInfo("Europe/Prague")
 _SENTENCE_END = re.compile(
     r"(?<=[.!?])(?<!\bnapř\.)(?<!\btzv\.)(?<!\bč\.)(?<!\bresp\.)(?<!\be\.g\.)(?<!\bi\.e\.)"
     r"\s+(?=[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ])"
@@ -72,6 +79,12 @@ LABELS: dict[str, dict[str, str]] = {
         "since": "since {when}",
         "last_seen": "last {when}",
         "resolved_at": "resolved {when}",
+        "severity_critical": "🔴 Critical",
+        "severity_warning": "🟠 Warning",
+        "severity_info": "🔵 Info",
+        "first_seen": "first seen {when}",
+        "lasted": "lasted {duration}",
+        "confidence": "Confidence",
     },
     "Czech": {
         "create_ticket": "Navrhuji založit ticket",
@@ -113,6 +126,12 @@ LABELS: dict[str, dict[str, str]] = {
         "since": "od {when}",
         "last_seen": "naposledy {when}",
         "resolved_at": "vyřešeno {when}",
+        "severity_critical": "🔴 Kritický",
+        "severity_warning": "🟠 Varování",
+        "severity_info": "🔵 Informace",
+        "first_seen": "poprvé zaznamenáno {when}",
+        "lasted": "trvalo {duration}",
+        "confidence": "Jistota",
     },
 }
 
@@ -215,7 +234,122 @@ def proposal_card(
         *parts,
         {"type": "TextBlock", "text": footer, "size": "Small", "isSubtle": True, "wrap": True},
     ]
-    card = {
+    card = _message(body, f"🎫 {ref} · {proposal.title}")
+    if header.logo and card_bytes(card) > CARD_MAX_BYTES:
+        print(f"{ref}: logo left out, the card would exceed what Teams accepts", file=sys.stderr)
+        plain = replace(header, logo=None)
+        return proposal_card(incident, proposal, plain, reach, days, links, language)
+    return card
+
+
+def incident_card(
+    event: Event,
+    incident: sqlite3.Row | None,
+    header: Header,
+    diagnosis: Diagnosis | None = None,
+    language: str = "English",
+) -> dict[str, Any]:
+    """An opened incident with its diagnosis when the check made one, or a short resolved note."""
+    text = labels(language)
+    resolved = event.kind == "resolved"
+    style = "good" if resolved else SEVERITY_STYLES.get(event.severity, "default")
+    badge = text["badge_resolved"] if resolved else text[f"severity_{event.severity}"]
+    parts = (
+        _resolved(event, incident, text) if resolved else _opened(event, incident, diagnosis, text)
+    )
+    body = [_header_row(header, style, badge), *parts]
+    if incident is not None:
+        footer = f"{short_id(incident['id'])} · {incident['rule']}"
+        body.append(
+            {"type": "TextBlock", "text": footer, "size": "Small", "isSubtle": True, "wrap": True}
+        )
+    card = _message(body, f"{event.title}: {_clip(event.message, 200)}")
+    if header.logo and card_bytes(card) > CARD_MAX_BYTES:
+        print(
+            f"{event.title}: logo left out, the card would exceed what Teams accepts",
+            file=sys.stderr,
+        )
+        return incident_card(event, incident, replace(header, logo=None), diagnosis, language)
+    return card
+
+
+def stored_diagnosis(incident: sqlite3.Row) -> Diagnosis | None:
+    if not incident["diagnosis"]:
+        return None
+    return Diagnosis(**json.loads(incident["diagnosis"]))
+
+
+def _opened(
+    event: Event,
+    incident: sqlite3.Row | None,
+    diagnosis: Diagnosis | None,
+    text: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    body: list[dict[str, Any]] = [
+        {
+            "type": "TextBlock",
+            "text": _clip(event.message or event.title, SUMMARY_MAX_CHARS),
+            "size": "Medium",
+            "weight": "Bolder",
+            "wrap": True,
+        }
+    ]
+    if incident is not None:
+        body.append(_small(text["first_seen"].format(when=_when(_prague(incident["opened_at"])))))
+    if diagnosis is not None:
+        body.append(_diagnosis(diagnosis, text))
+    if event.url:
+        source = {"type": "Action.OpenUrl", "title": text["source"], "url": event.url}
+        body.append({"type": "ActionSet", "actions": [source]})
+    return body
+
+
+def _diagnosis(diagnosis: Diagnosis, text: Mapping[str, str]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = [
+        {"type": "TextBlock", "text": text["diagnosis"], "weight": "Bolder"},
+        {
+            "type": "TextBlock",
+            "text": _clip(diagnosis.summary, DIAGNOSIS_MAX_CHARS),
+            "wrap": True,
+            "spacing": "Small",
+        },
+    ]
+    if diagnosis.likely_cause:
+        items += [
+            {"type": "TextBlock", "text": text["cause"], "weight": "Bolder", "spacing": "Medium"},
+            {
+                "type": "TextBlock",
+                "text": _clip(diagnosis.likely_cause, DIAGNOSIS_MAX_CHARS),
+                "wrap": True,
+                "spacing": "Small",
+            },
+        ]
+    if diagnosis.confidence:
+        confidence = text.get(diagnosis.confidence, diagnosis.confidence)
+        items.append(
+            _small(f"{text['confidence']}: {confidence}") | {"isSubtle": True, "spacing": "Small"}
+        )
+    return {"type": "Container", "style": "emphasis", "items": items}
+
+
+def _resolved(
+    event: Event, incident: sqlite3.Row | None, text: Mapping[str, str]
+) -> list[dict[str, Any]]:
+    if incident is None or not incident["resolved_at"]:
+        return [
+            {"type": "TextBlock", "text": _clip(event.message, SUMMARY_MAX_CHARS), "wrap": True}
+        ]
+    opened, ended = _prague(incident["opened_at"]), _prague(incident["resolved_at"])
+    lasted = text["lasted"].format(duration=duration((ended - opened).total_seconds()))
+    when = text["resolved_at"].format(when=_later(ended, opened))
+    return [
+        {"type": "TextBlock", "text": _clip(incident["summary"], SUMMARY_MAX_CHARS), "wrap": True},
+        _small(f"{lasted} · {when}"),
+    ]
+
+
+def _message(body: list[dict[str, Any]], fallback: str) -> dict[str, Any]:
+    return {
         "type": "message",
         "attachments": [
             {
@@ -225,17 +359,12 @@ def proposal_card(
                     "type": "AdaptiveCard",
                     "version": "1.4",
                     "msteams": {"width": "Full"},
-                    "fallbackText": f"🎫 {ref} · {proposal.title}",
+                    "fallbackText": fallback,
                     "body": body,
                 },
             }
         ],
     }
-    if header.logo and card_bytes(card) > CARD_MAX_BYTES:
-        print(f"{ref}: logo left out, the card would exceed what Teams accepts", file=sys.stderr)
-        plain = replace(header, logo=None)
-        return proposal_card(incident, proposal, plain, reach, days, links, language)
-    return card
 
 
 def _full(
@@ -330,6 +459,10 @@ def _header(
     header: Header, incident: sqlite3.Row, reach: Scope, text: Mapping[str, str]
 ) -> dict[str, Any]:
     style, badge = _badge(incident, reach)
+    return _header_row(header, style, text[badge])
+
+
+def _header_row(header: Header, style: str, badge: str) -> dict[str, Any]:
     columns: list[dict[str, Any]] = []
     if header.logo:
         image = {"type": "Image", "url": header.logo, "width": "32px", "altText": header.shop}
@@ -355,7 +488,7 @@ def _header(
             "items": names,
         }
     )
-    status = {"type": "TextBlock", "text": text[badge], "weight": "Bolder", "size": "Small"}
+    status = {"type": "TextBlock", "text": badge, "weight": "Bolder", "size": "Small"}
     columns.append(
         {
             "type": "Column",
@@ -456,6 +589,16 @@ def _cause(incident: sqlite3.Row) -> str:
     if not incident["diagnosis"]:
         return ""
     return Diagnosis(**json.loads(incident["diagnosis"])).likely_cause
+
+
+def _clip(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _prague(moment: str) -> datetime:
+    return datetime.fromisoformat(moment).astimezone(PRAGUE)
 
 
 def _sentence(text: str) -> str:

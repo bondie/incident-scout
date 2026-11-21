@@ -36,7 +36,14 @@ from .evaluation import (
 from .evidence import EvidencePack, labels_from_key
 from .investigator import CATEGORIES, SCOPES, Diagnosis, InvestigationError, OllamaInvestigator
 from .models import Event
-from .notify import ConsoleNotifier, DesktopNotifier, Notifier, NtfyNotifier, dispatch
+from .notify import (
+    ConsoleNotifier,
+    DesktopNotifier,
+    Notifier,
+    NtfyNotifier,
+    TeamsNotifier,
+    dispatch,
+)
 from .proposal import Proposal, draft, new_token
 from .rules import Rule
 from .sources.base import parse_duration
@@ -204,8 +211,10 @@ def _check(args: argparse.Namespace) -> int:
     for event in events:
         ConsoleNotifier().send(event)
     dispatch(_push_notifiers(config), events, config.notify.max_per_run)
+    follow_ups: list[Event] = []
     if config.investigator is not None:
-        _investigate_new(config, store, events, now)
+        follow_ups = _investigate_new(config, store, events, now)
+    _post_to_teams(config, store, [*events, *follow_ups])
     if config.tickets is not None:
         _propose_due(config, store, now)
     open_count = len(store.open_incidents())
@@ -218,9 +227,12 @@ def _check(args: argparse.Namespace) -> int:
     return 0
 
 
-def _investigate_new(config: Config, store: Store, events: Sequence[Event], now: datetime) -> None:
+def _investigate_new(
+    config: Config, store: Store, events: Sequence[Event], now: datetime
+) -> list[Event]:
     """Diagnose freshly opened incidents and follow up on their notification."""
     settings = triage.investigator_config(config)
+    follow_ups: list[Event] = []
     for event in events:
         if event.kind != "opened":
             continue
@@ -229,12 +241,29 @@ def _investigate_new(config: Config, store: Store, events: Sequence[Event], now:
             continue
         if store.diagnoses_since(now - timedelta(hours=1)) >= settings.max_per_hour:
             print("investigation skipped: hourly budget used up", file=sys.stderr)
-            return
+            return follow_ups
         follow_up = _diagnose(config, store, incident, now)
         store.record([follow_up], now)
         ConsoleNotifier().send(follow_up)
+        follow_ups.append(follow_up)
         if follow_up.kind == "diagnosed":
             dispatch(_push_notifiers(config), [follow_up])
+    return follow_ups
+
+
+def _post_to_teams(config: Config, store: Store | None, events: Sequence[Event]) -> None:
+    """After the investigation, so an incident and its diagnosis share one card."""
+    if not config.notify.teams_url:
+        return
+    language = config.investigator.language if config.investigator is not None else "English"
+    notifier = TeamsNotifier(
+        config.notify.teams_url,
+        store.incident if store is not None else lambda _id: None,
+        lambda incident: _card_header(config, incident),
+        language,
+        config.notify.teams_kinds,
+    )
+    notifier.post(events, config.notify.max_per_run)
 
 
 def _diagnose(config: Config, store: Store, incident: sqlite3.Row, now: datetime) -> Event:
@@ -387,23 +416,31 @@ def _card(
 ) -> dict[str, Any]:
     settings = _tickets(config)
     history = _related_history(store, incident, now, settings.recurring_days)
-    rule = next(
-        (r for r in config.rules if r.name == incident["rule"]), Rule(incident["rule"], "promql")
-    )
-    shop = rule.shop or json.loads(incident["labels"] or "{}").get("shop", "")
-    header = teams.Header(
-        rule.shop_title or shop.capitalize(),
-        rule.title or rule.name,
-        teams.logo(_logo(config, shop)),
-    )
+    rule = _incident_rule(config, incident)
     return teams.proposal_card(
         incident,
         proposal,
-        header,
+        _card_header(config, incident),
         teams.scope(incident, history, now, records=bool(rule.record_labels)),
         settings.recurring_days,
         server.links(f"http://127.0.0.1:{settings.port}", incident["id"], token),
         triage.investigator_config(config).language,
+    )
+
+
+def _incident_rule(config: Config, incident: sqlite3.Row) -> Rule:
+    return next(
+        (r for r in config.rules if r.name == incident["rule"]), Rule(incident["rule"], "promql")
+    )
+
+
+def _card_header(config: Config, incident: sqlite3.Row) -> teams.Header:
+    rule = _incident_rule(config, incident)
+    shop = rule.shop or json.loads(incident["labels"] or "{}").get("shop", "")
+    return teams.Header(
+        rule.shop_title or shop.capitalize(),
+        rule.title or rule.name,
+        teams.logo(_logo(config, shop)),
     )
 
 
@@ -901,6 +938,7 @@ def _notify_test(args: argparse.Namespace) -> int:
         group="test",
     )
     dispatch(_push_notifiers(config), [event])
+    _post_to_teams(config, None, [event])
     ConsoleNotifier().send(event)
     return 0
 
