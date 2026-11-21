@@ -29,7 +29,8 @@ mysql-down: 0 episodes would notify (1 raw)
 
 You need [uv](https://docs.astral.sh/uv/) and access to your telemetry. Notifications use
 macOS Notification Center ([terminal-notifier](https://github.com/julienXX/terminal-notifier)
-if installed, `osascript` otherwise) and optionally [ntfy](https://ntfy.sh) for your phone.
+if installed, `osascript` otherwise), optionally [ntfy](https://ntfy.sh) for your phone and
+a Microsoft Teams channel (see [below](#how-it-behaves)).
 
 **1. Install.**
 
@@ -251,6 +252,17 @@ Both kinds need `above` or `below`; without a threshold every series would be a 
   is blind"* notification goes out, and another when telemetry is back. A single broken rule
   is reported the same way, without affecting the others.
 - **No storms.** More events than `max_per_run` in one check collapse into a single summary.
+- **Incidents in Teams.** With `notify.teams_url`, a Workflows webhook ("Post to a channel
+  when a webhook request is received", triggered by *anyone*), every incident posts an
+  Adaptive Card when it opens and a short one when it resolves (`notify.teams_kinds`, by
+  default `[opened, resolved]`). The opened card shows the shop with its logo, the rule, the
+  severity, the summary, when it was first seen and a link to the telemetry. It waits until
+  the check's investigation is done, so a diagnosis made in the same check (summary, likely
+  cause, confidence) arrives inside it; a diagnosis made in a later check is not posted on its
+  own. The resolved card says how long the incident lasted. Labels follow
+  `investigator.language` (English without an investigator), times are Europe/Prague. Long
+  texts are clipped, a card over 27 KB drops its logo, and a failing webhook is logged
+  without stopping the check. Use a different channel than the ticket proposals.
 - **Read-only.** incident-scout only queries telemetry. State, history and evidence live in
   one SQLite file (`~/.local/share/incident-scout/state.db`).
 - **A file for viewers.** Every check and decision rewrites `status.json` next to the

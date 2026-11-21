@@ -14,7 +14,7 @@ from typing import Any, cast, get_args
 import yaml
 
 from .evidence import EvidenceKind, EvidenceQuery
-from .models import SEVERITIES
+from .models import EVENT_KINDS, SEVERITIES
 from .rules import Rule, RuleKind
 from .sources.base import parse_duration
 from .sources.cloudwatch import CloudWatchTelemetry
@@ -42,6 +42,8 @@ class NotifyConfig:
     ntfy_topic: str | None = None
     ntfy_token: str | None = None
     max_per_run: int = 5
+    teams_url: str | None = None
+    teams_kinds: tuple[str, ...] = ("opened", "resolved")
 
 
 @dataclass(frozen=True)
@@ -150,7 +152,7 @@ def load_config(path: Path | None = None) -> Config:
     names = [rule.name for rule in rules]
     if len(names) != len(set(names)):
         raise ConfigError("Rule names must be unique")
-    notify = _build(NotifyConfig, raw.get("notify") or {}, "notify")
+    notify = _notify(raw.get("notify") or {})
     options: dict[str, Any] = {
         key: int(raw[key])
         for key in ("interval_minutes", "blind_after", "resolve_after", "timeout_seconds")
@@ -218,6 +220,28 @@ def _rules(
             copy |= {"name": f"{data.get('name')}@{target}", "source": target}
         rules.append(_rule(copy, _variables(variables, sources, copy.get("source", DEFAULT))))
     return rules
+
+
+def _notify(value: Mapping[str, Any]) -> NotifyConfig:
+    data = dict(value)
+    if "teams_kinds" in data:
+        data["teams_kinds"] = _teams_kinds(data["teams_kinds"])
+    return cast(NotifyConfig, _build(NotifyConfig, data, "notify"))
+
+
+def _teams_kinds(kinds: Any) -> tuple[str, ...]:
+    if isinstance(kinds, str) or not isinstance(kinds, list) or not kinds:
+        raise ConfigError(
+            "notify.teams_kinds must be a list of event kinds, e.g. [opened, resolved]"
+        )
+    names = tuple(str(kind) for kind in kinds)
+    if "diagnosed" in names:
+        raise ConfigError("notify.teams_kinds: diagnosed is never posted alone, it joins `opened`")
+    unknown = sorted(set(names) - set(EVENT_KINDS))
+    if unknown:
+        known = ", ".join(EVENT_KINDS)
+        raise ConfigError(f"notify.teams_kinds: unknown {', '.join(unknown)}; known: {known}")
+    return names
 
 
 def _investigator(
