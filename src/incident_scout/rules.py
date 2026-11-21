@@ -41,8 +41,10 @@ class Rule:
     are covered per problem. `hold` is how long an incident collects quietly before it is
     announced, so a burst of failures arrives as one notice.
     `title` names the problem on ticket cards; `shop` and `shop_title` default to the vars of
-    the rule's source. `index`, `group_by` and `time_field` belong to elasticsearch rules,
-    whose query is the JSON of an Elasticsearch query clause.
+    the rule's source, and so do `shop_label` and `shop_pattern`, which find the affected shop
+    in a label of a shared source (an Orchesty namespace) for the card's logo and name.
+    `index`, `group_by` and `time_field` belong to elasticsearch rules, whose query is the JSON
+    of an Elasticsearch query clause.
     """
 
     name: str
@@ -67,6 +69,8 @@ class Rule:
     title: str = ""
     shop: str = ""
     shop_title: str = ""
+    shop_label: str = ""
+    shop_pattern: str = ""
     index: str | None = None
     group_by: str | None = None
     time_field: str = "timestamp"

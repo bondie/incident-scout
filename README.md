@@ -255,12 +255,16 @@ Both kinds need `above` or `below`; without a threshold every series would be a 
 - **Incidents in Teams.** With `notify.teams_url`, a Workflows webhook ("Post to a channel
   when a webhook request is received", triggered by *anyone*), every incident posts an
   Adaptive Card when it opens and a short one when it resolves (`notify.teams_kinds`, by
-  default `[opened, resolved]`). The opened card shows the shop with its logo, the rule, the
-  severity, the summary, when it was first seen and a link to the telemetry. It waits until
-  the check's investigation is done, so a diagnosis made in the same check (summary, likely
-  cause, confidence) arrives inside it; a diagnosis made in a later check is not posted on its
-  own. The resolved card says how long the incident lasted. Labels follow
-  `investigator.language` (English without an investigator), times are Europe/Prague. Long
+  default `[opened, resolved]`). The card is one row, like an issue in Sentry's list: the
+  rule's `title` as a link to the telemetry, the summary without its leading `shop: ` behind a
+  marker in the severity's colour, and a meta line `SCOUT-47 | Critical | Shop | rule` after
+  the shop's logo, only the severity coloured (green *Resolved* once it ends). At the right
+  stand when it started and, for rules with `record_labels` or a summary counting `N×`, the
+  number of records; a resolved card shows how long it lasted and when it ended. Teams writes
+  the dates with its `DATE` and `TIME` functions, in the reader's language and time zone. It
+  waits until the check's investigation is done, so a diagnosis made in the same check
+  arrives as a *Cause* line under the row; a diagnosis made in a later check is not posted
+  on its own. Labels follow `investigator.language` (English without an investigator). Long
   texts are clipped, a card over 27 KB drops its logo, and a failing webhook is logged
   without stopping the check. Use a different channel than the ticket proposals.
 - **Read-only.** incident-scout only queries telemetry. State, history and evidence live in
@@ -356,11 +360,12 @@ repeat a cause a person has already rejected.
 
 The proposal arrives as a card in a Microsoft Teams channel, through a Workflows webhook
 ("Send webhook alerts to a channel", triggered by *anyone*, since the monitor does not sign
-in). The card names the shop and the problem (`title` on the rule, the shop from the source's
-`shop_title` or `shop` var, or the incident's `shop` label), shows a status badge (*ongoing*,
-*recurs*, *growing*, *resolved*), how many records (with `record_labels`) or incidents the
-problem had in `recurring_days` and how many of them today, since when it lasts, the priority,
-the affected records and the likely cause. **Approve the ticket** and **Reject with a reason** open a small page served on your
+in). The card has the same row as the incident card: the proposed ticket title as a link to
+the detail page, the reason, and a meta line with the id, the status (*ongoing*, *recurs*,
+*growing*, *resolved*), the shop, the priority and the rule; at the right how many records
+(with `record_labels`) or incidents the problem had in `recurring_days` and when it was last
+seen. Under the row come the likely cause, the affected records and the recommendation.
+**Approve the ticket** and **Reject with a reason** open a small page served on your
 machine (`scout serve`, installed next to the checks by `scout install`): it records the
 decision, with a reason and the ticket that already covers the problem when you reject, and
 shows the ticket text to copy for the PM. Nothing reaches the PM without a person approving
@@ -371,9 +376,19 @@ Only proposals that need a decision reach Teams. *No ticket needed* stays on the
 the page and is marked rejected with the model's reason. *Already in ticket X* posts a short
 card with only a link to the detail, and the ticket covers the next incidents of the problem.
 
-Every incident has an id such as `SCOUT-47`, in the card's footer, the page, `scout show`
+Every incident has an id such as `SCOUT-47`, in the card's meta line, the page, `scout show`
 and `scout history`; every command takes it as well as the plain number.
 
+The shop is named on every card, from the rule's `shop_title`, else `shop_titles:
+{shop-a: Shop A}` by the shop var or label, else the shop capitalised.
+A source shared by several shops (one Orchesty cluster for all of them) can name the shop
+an incident hit from one of its labels: `vars: {shop: orchesty, shop_label: namespace,
+shop_pattern: '^orchesty-(?P<shop>[a-z0-9]+)-prod$'}` takes the `shop` group of the pattern
+from the `namespace` label (the label must be in the rule's `key_labels`; without a pattern
+the whole label is the shop). `shop_aliases: {albra: prod-hetzner-albra}` turns the name
+found into the key of `logos` and `shop_titles`. The card then shows that shop's logo and
+name with the source as context (`Albra | Orchesty`); a label that does not match leaves
+the source's own shop.
 A logo per shop goes in front of the shop name: `logos: {shop-a: ~/logos/shop-a.png}`. A
 local png or jpg of at most 18 KB is embedded in the card, an `https://` URL is used as it is.
 Embedding makes a file a third bigger and Teams refuses a card of about 28 KB, so a card that

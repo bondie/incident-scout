@@ -3,10 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sqlite3
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -436,16 +437,35 @@ def _incident_rule(config: Config, incident: sqlite3.Row) -> Rule:
 
 def _card_header(config: Config, incident: sqlite3.Row) -> teams.Header:
     rule = _incident_rule(config, incident)
-    shop = rule.shop or json.loads(incident["labels"] or "{}").get("shop", "")
-    return teams.Header(
-        rule.shop_title or shop.capitalize(),
-        rule.title or rule.name,
-        teams.logo(_logo(config, shop)),
-    )
+    labels = _labels(incident)
+    shop = rule.shop or labels.get("shop", "")
+    name = rule.shop_title or _by_shop(config.shop_titles, shop) or shop.capitalize()
+    title = rule.title or rule.name
+    found = _affected_shop(rule, labels)
+    if not found:
+        return teams.Header(name, title, teams.logo(_by_shop(config.logos, shop)), shop)
+    affected = _by_shop(config.shop_aliases, found) or found
+    shown = _by_shop(config.shop_titles, affected) or _by_shop(config.shop_titles, found)
+    image = _by_shop(config.logos, affected) or _by_shop(config.logos, found)
+    return teams.Header(shown or found.capitalize(), title, teams.logo(image), shop, name)
 
 
-def _logo(config: Config, shop: str) -> str | None:
-    return {name.lower(): logo for name, logo in config.logos.items()}.get(shop.lower())
+def _affected_shop(rule: Rule, labels: Mapping[str, str]) -> str:
+    """The shop a shared source (one Orchesty cluster for all shops) names in a label."""
+    if not rule.shop_label:
+        return ""
+    found = re.match(rule.shop_pattern or "(?P<shop>.+)", labels.get(rule.shop_label, ""))
+    return found["shop"] if found and found["shop"] else ""
+
+
+def _labels(incident: sqlite3.Row) -> dict[str, str]:
+    if incident["labels"]:
+        return dict(json.loads(incident["labels"]))
+    return labels_from_key(incident["fingerprint"].partition("|")[2])
+
+
+def _by_shop(values: Mapping[str, str], shop: str) -> str | None:
+    return {name.lower(): value for name, value in values.items()}.get(shop.lower())
 
 
 def _tickets(config: Config) -> TicketsConfig:

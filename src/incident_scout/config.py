@@ -109,6 +109,8 @@ class Config:
     investigator: InvestigatorConfig | None = None
     tickets: TicketsConfig | None = None
     logos: Mapping[str, str] = field(default_factory=dict)
+    shop_titles: Mapping[str, str] = field(default_factory=dict)
+    shop_aliases: Mapping[str, str] = field(default_factory=dict)
 
     def rule(self, name: str) -> Rule:
         for rule in self.rules:
@@ -172,6 +174,16 @@ def load_config(path: Path | None = None) -> Config:
         if not isinstance(raw["logos"], Mapping):
             raise ConfigError("logos must map a shop to a png/jpg file or an https URL")
         options["logos"] = {str(shop): str(logo) for shop, logo in raw["logos"].items()}
+    if raw.get("shop_titles"):
+        if not isinstance(raw["shop_titles"], Mapping):
+            raise ConfigError("shop_titles must map a shop to the name shown on Teams cards")
+        options["shop_titles"] = {str(shop): str(name) for shop, name in raw["shop_titles"].items()}
+    if raw.get("shop_aliases"):
+        if not isinstance(raw["shop_aliases"], Mapping):
+            raise ConfigError("shop_aliases must map a name found by shop_pattern to a shop")
+        options["shop_aliases"] = {
+            str(name): str(shop) for name, shop in raw["shop_aliases"].items()
+        }
     named = {name: value for name, value in sources.items() if name != DEFAULT}
     return Config(source=sources[DEFAULT], rules=rules, sources=named, notify=notify, **options)
 
@@ -282,6 +294,19 @@ def _quiet_hours(value: Mapping[str, Any]) -> QuietHours:
     return cast(QuietHours, _build(QuietHours, quiet, "quiet_hours"))
 
 
+def _check_shop_pattern(data: Mapping[str, Any], name: str) -> None:
+    if not data["shop_pattern"]:
+        return
+    if not data["shop_label"]:
+        raise ConfigError(f"rules.{name}.shop_pattern needs shop_label, the label it reads")
+    try:
+        pattern = re.compile(str(data["shop_pattern"]))
+    except re.error as error:
+        raise ConfigError(f"rules.{name}.shop_pattern is not a regex: {error}") from error
+    if "shop" not in pattern.groupindex:
+        raise ConfigError(f"rules.{name}.shop_pattern needs a named group (?P<shop>...)")
+
+
 def _clock(value: Any, where: str) -> time:
     if isinstance(value, int):  # YAML 1.1 reads an unquoted 22:00 as sexagesimal 1320
         return time(value // 60 % 24, value % 60)
@@ -356,8 +381,9 @@ def _rule(item: Mapping[str, Any], variables: Mapping[str, str]) -> Rule:
     for key in ("query", "summary", "url", "title", "index", "group_by"):
         if isinstance(data.get(key), str):
             data[key] = Template(data[key]).safe_substitute(variables)
-    for key in ("shop", "shop_title"):
+    for key in ("shop", "shop_title", "shop_label", "shop_pattern"):
         data.setdefault(key, variables.get(key, ""))
+    _check_shop_pattern(data, name)
     for key in ("key_labels", "record_labels", "problem_labels"):
         if key in data:
             data[key] = tuple(data[key])
