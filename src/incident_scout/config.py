@@ -17,6 +17,7 @@ from .evidence import EvidenceKind, EvidenceQuery
 from .models import EVENT_KINDS, SEVERITIES
 from .rules import Rule, RuleKind
 from .sources.base import parse_duration
+from .sources.cloudflare import CloudflareTelemetry
 from .sources.cloudwatch import CloudWatchTelemetry
 from .sources.elasticsearch import ElasticsearchTelemetry
 from .sources.http import HttpTelemetry
@@ -25,9 +26,10 @@ from .sources.tls import parse_targets
 
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 CLOUDWATCH_KINDS = ("cloudwatch", "logs_insights")
-WINDOW_KINDS = (*CLOUDWATCH_KINDS, "elasticsearch")
-THRESHOLD_KINDS = ("elasticsearch", "tls")
-ELASTICSEARCH_OPTIONS = ("index", "group_by", "time_field")
+WINDOW_KINDS = (*CLOUDWATCH_KINDS, "elasticsearch", "cloudflare")
+THRESHOLD_KINDS = ("elasticsearch", "cloudflare", "tls")
+ELASTICSEARCH_OPTIONS = ("index", "time_field")
+GROUP_BY_KINDS = ("elasticsearch", "cloudflare")
 DEFAULT = "default"
 
 
@@ -319,7 +321,13 @@ def _clock(value: Any, where: str) -> time:
 
 def build_telemetry(
     source: Mapping[str, Any],
-) -> McpTelemetry | HttpTelemetry | CloudWatchTelemetry | ElasticsearchTelemetry:
+) -> (
+    McpTelemetry
+    | HttpTelemetry
+    | CloudWatchTelemetry
+    | ElasticsearchTelemetry
+    | CloudflareTelemetry
+):
     options = dict(source)
     options.pop("vars", None)
     kind = options.pop("type", "mcp")
@@ -329,6 +337,10 @@ def build_telemetry(
         if not options.get("url"):
             raise ConfigError("source.url is required for an elasticsearch source")
         return cast(ElasticsearchTelemetry, _build(ElasticsearchTelemetry, options, "source"))
+    if kind == "cloudflare":
+        if not options.get("zone") or not options.get("token"):
+            raise ConfigError("source.zone and source.token are required for a cloudflare source")
+        return cast(CloudflareTelemetry, _build(CloudflareTelemetry, options, "source"))
     if kind == "cloudwatch":
         allowed = {
             key: options[key] for key in ("profile", "region", "query_timeout") if key in options
@@ -340,7 +352,8 @@ def build_telemetry(
         return CloudWatchTelemetry(**allowed)
     if kind != "mcp":
         raise ConfigError(
-            f"Unknown source type {kind!r}, expected mcp, http, cloudwatch or elasticsearch"
+            f"Unknown source type {kind!r}, expected mcp, http, cloudwatch, elasticsearch"
+            " or cloudflare"
         )
     tools = _build(McpTools, options.pop("tools", None) or {}, "source.tools")
     server = options.pop("claude_mcp_server", None)
@@ -400,13 +413,19 @@ def _rule(item: Mapping[str, Any], variables: Mapping[str, str]) -> Rule:
     if data["kind"] != "alertmanager" and not data.get("query"):
         raise ConfigError(f"rules.{name}.query is required")
     if data["kind"] == "elasticsearch":
-        data["query"] = _elasticsearch_query(data["query"], variables, f"rules.{name}.query")
+        data["query"] = _json_query(data["query"], variables, f"rules.{name}.query")
+    if data["kind"] == "cloudflare":
+        data["query"] = _json_query(data["query"], variables, f"rules.{name}.query", "filter")
+        if not isinstance(data.get("group_by", ""), str):
+            data["group_by"] = ",".join(_substituted(data["group_by"], variables))
     if data["kind"] == "tls":
         data["query"] = _tls_targets(data["query"], variables, f"rules.{name}.query")
         data.setdefault("key_labels", ("target",))
     if data["kind"] != "elasticsearch" and any(key in data for key in ELASTICSEARCH_OPTIONS):
         used = ", ".join(key for key in ELASTICSEARCH_OPTIONS if key in data)
         raise ConfigError(f"rules.{name}: {used} only apply to elasticsearch rules")
+    if data["kind"] not in GROUP_BY_KINDS and "group_by" in data:
+        raise ConfigError(f"rules.{name}: group_by only applies to elasticsearch and cloudflare")
     if data["kind"] in THRESHOLD_KINDS and data.get("above") is None and data.get("below") is None:
         raise ConfigError(f"rules.{name} needs above or below, or every series is a problem")
     if data["kind"] in WINDOW_KINDS:
@@ -420,7 +439,7 @@ def _rule(item: Mapping[str, Any], variables: Mapping[str, str]) -> Rule:
     return cast(Rule, _build(Rule, data, f"rules.{name}"))
 
 
-def _elasticsearch_query(value: Any, variables: Mapping[str, str], where: str) -> str:
+def _json_query(value: Any, variables: Mapping[str, str], where: str, what: str = "query") -> str:
     """A mapping or JSON text, kept as JSON; $vars fill a mapping's strings before it is
     serialized, so a value with quotes cannot break the JSON."""
     query = value
@@ -430,7 +449,8 @@ def _elasticsearch_query(value: Any, variables: Mapping[str, str], where: str) -
         except ValueError as error:
             raise ConfigError(f"{where} is not valid JSON: {error}") from error
     if not isinstance(query, Mapping) or not query:
-        raise ConfigError(f"{where} must be an Elasticsearch query object, e.g. {{bool: ...}}")
+        example = "{bool: ...}" if what == "query" else "{edgeResponseStatus: 403}"
+        raise ConfigError(f"{where} must be a {what} object, e.g. {example}")
     if isinstance(value, str):
         return json.dumps(query)
     return json.dumps(_filled(query, variables))

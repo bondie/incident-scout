@@ -49,8 +49,9 @@ cp config.example.yaml ~/.config/incident-scout/config.yaml
 
 The telemetry comes from the standard HTTP APIs (`type: http`), from an MCP server that
 wraps them (`type: mcp`), from Amazon CloudWatch (`type: cloudwatch`, see
-[below](#amazon-cloudwatch)), or from Elasticsearch (`type: elasticsearch`, see
-[below](#elasticsearch-and-tls-certificates)). If the MCP server is already registered in Claude Code,
+[below](#amazon-cloudwatch)), from Elasticsearch (`type: elasticsearch`, see
+[below](#elasticsearch)), or from Cloudflare's analytics
+(`type: cloudflare`, see [below](#cloudflare)). If the MCP server is already registered in Claude Code,
 `claude_mcp_server: <name>` reuses its URL and credentials, so no token is copied into
 another file.
 
@@ -100,6 +101,7 @@ rules:
 | `cloudwatch` | Metrics Insights query or metric math, last complete period | `since` is the period; `above` or `below` keeps only the problems |
 | `logs_insights` | Logs Insights query over the last `since` | Name the number `value`; `filter` after `stats` keeps only the problems |
 | `elasticsearch` | documents matching a query over the last `since`, in total or per `group_by` | Needs an `elasticsearch` source; `above` or `below` keeps only the problems |
+| `cloudflare` | requests of a zone matching a filter over the last `since`, in total or per `group_by` dimensions | Needs a `cloudflare` source; counts are sampled estimates; `above` or `below` keeps only the problems |
 | `tls` | days until the certificate of each `host:port` expires | Works on any source; `below` keeps only the problems |
 
 `vars` defines `$name` placeholders, so a label selector shared by many rules is written once.
@@ -188,7 +190,7 @@ alarms, Logs Insights queries on the log groups you name, and the ECS service li
 deployments, nothing else. Metric rules are cheap; a Logs Insights rule scans its whole
 window on every check, so keep log rules few and windows short.
 
-## Elasticsearch and TLS certificates
+## Elasticsearch
 
 An `elasticsearch` source counts log documents, for example errors of an integration that
 writes its logs to Elasticsearch. The rule's `query` is an Elasticsearch query clause, written
@@ -218,6 +220,44 @@ rules:
     above: 2
     summary: '$shop: {node} failed to talk to the ERP {value:.0f}x in 30 min'
 ```
+
+## Cloudflare
+
+A `cloudflare` source counts the requests of one zone from the GraphQL Analytics API
+(`httpRequestsAdaptiveGroups`), for example partner bots that the WAF challenged, which never
+reach the origin and so never show in its logs. It needs the zone ID and an API token with
+only *Zone > Analytics > Read* on that zone. The rule's `query` is the dataset's filter object,
+written as YAML or as JSON text; it is combined with the window of the last `since` (default
+`5m`). `group_by` lists dimensions (`clientRequestHTTPHost`, `clientRequestPath`, `userAgent`,
+`securityAction`, ...); each combination is one series labelled by the dimension names, up to
+50 per check, most requests first. Without it, the rule sees the total, zero included.
+
+Adaptive analytics are sampled, so a rare request can be missed in a short window and counts
+are estimates; a window of hours suits events that happen a few times a day. A query may span
+at most the zone's retention (about a month on the Pro plan). Count only what a person must
+act on: a busy zone blocks scanners all day, so filter on the paths or user agents of known
+partners rather than on every 403.
+
+```yaml
+sources:
+  edge: {type: cloudflare, zone: '<zone id>', token: '${CLOUDFLARE_API_TOKEN}'}
+
+rules:
+  - name: partner-bot-blocked
+    kind: cloudflare
+    source: edge
+    query:
+      edgeResponseStatus: 403
+      OR:
+        - clientRequestPath_like: '/feed/%'
+        - userAgent_like: '%Zbozi%'
+    group_by: [clientRequestHTTPHost, userAgent]
+    since: 24h
+    above: 0
+    summary: '{clientRequestHTTPHost}: {userAgent} blocked {value:.0f}x in 24 h'
+```
+
+## TLS certificates
 
 A `tls` rule reads the certificate of every `host:port` in its `query` (a list, or a comma or
 space separated string) straight from a TLS handshake, so it also covers ports no HTTP probe
@@ -280,7 +320,7 @@ Both kinds need `above` or `below`; without a threshold every series would be a 
 `scout backtest` replays `promql` rules through range queries in daily chunks and groups the
 moments a rule fired into episodes. `cloudwatch` rules are replayed the same way, with their
 own period as the step and their threshold applied to every point; `logs_insights`,
-`elasticsearch` and `tls` rules cannot be replayed yet. It counts only episodes long enough to pass `for_runs`.
+`elasticsearch`, `cloudflare` and `tls` rules cannot be replayed yet. It counts only episodes long enough to pass `for_runs`.
 Some MCP servers let log queries look back only from "now", without setting a step. For
 those, `logql` rules are replayed in 12-hour chunks reached with LogQL `offset`, so the
 server's automatic step stays below the rule's window and short spikes are not stepped over.

@@ -36,6 +36,10 @@ source:
 #     index: 'shop-a-*'                # a rule's own `index` overrides it
 #     # headers: {Authorization: "ApiKey ${ES_API_KEY}"}
 #     vars: {shop: shop-a}
+#   edge:                              # requests seen by Cloudflare, for cloudflare rules
+#     type: cloudflare
+#     zone: '<zone id>'
+#     token: ${CLOUDFLARE_API_TOKEN}     # only Zone > Analytics > Read on that zone
 #   cluster:                           # one cluster for all shops: the shop is in a label
 #     type: http
 #     prometheus_url: https://prometheus.example
@@ -166,6 +170,19 @@ rules:
   #   since: 30m
   #   above: 2
   #   summary: '$shop: {node} failed to talk to the ERP {value:.0f}x in 30 min'
+  # Cloudflare: requests of the zone matching a filter of httpRequestsAdaptiveGroups over the
+  # last `since` (default 5m), per `group_by` dimensions or in total. Counts are sampled.
+  # Needs `above` or `below`.
+  # - name: partner-bot-blocked
+  #   kind: cloudflare
+  #   source: edge
+  #   query:
+  #     edgeResponseStatus: 403
+  #     OR: [{clientRequestPath_like: '/feed/%'}, {userAgent_like: '%Zbozi%'}]
+  #   group_by: [clientRequestHTTPHost, userAgent]
+  #   since: 24h
+  #   above: 0
+  #   summary: '{clientRequestHTTPHost}: {userAgent} blocked {value:.0f}x in 24 h'
   # TLS certificates of any host:port, read from the handshake without verification: days
   # until notAfter, negative once expired; an unreachable target is -9999 with {error}.
   # It ignores its source's telemetry; pick a source that opens without a network call.
