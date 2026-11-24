@@ -79,7 +79,7 @@ async def backtest(
     """Replay a rule over history and group the moments it fired into episodes."""
     if rule.kind == "alertmanager":
         raise ValueError("Alertmanager rules have no history; replay ALERTS{} as a promql rule")
-    if rule.kind in ("logs_insights", "elasticsearch", "tls"):
+    if rule.kind in ("logs_insights", "elasticsearch", "cloudflare", "tls"):
         raise ValueError(f"{rule.kind} rules cannot be replayed yet")
     if rule.kind == "cloudwatch":
         return await _replay_metrics(rule, telemetry, start, end)

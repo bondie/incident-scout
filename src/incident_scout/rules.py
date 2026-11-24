@@ -10,12 +10,20 @@ from typing import Any, Literal, cast
 
 from .models import SEVERITIES, Alert, Finding, Series, Severity
 from .sources.base import SourceError, Telemetry, parse_duration
+from .sources.cloudflare import CloudflareTelemetry
 from .sources.cloudwatch import CloudWatchTelemetry
 from .sources.elasticsearch import ElasticsearchTelemetry
 from .sources.tls import certificate_series, parse_targets
 
 RuleKind = Literal[
-    "promql", "logql", "alertmanager", "cloudwatch", "logs_insights", "elasticsearch", "tls"
+    "promql",
+    "logql",
+    "alertmanager",
+    "cloudwatch",
+    "logs_insights",
+    "elasticsearch",
+    "cloudflare",
+    "tls",
 ]
 METRIC_DELAY = 60  # CloudWatch publishes a period's datapoint about a minute after it ends
 MERGED_SHOWN = 5
@@ -44,7 +52,8 @@ class Rule:
     the rule's source, and so do `shop_label` and `shop_pattern`, which find the affected shop
     in a label of a shared source (an Orchesty namespace) for the card's logo and name.
     `index`, `group_by` and `time_field` belong to elasticsearch rules, whose query is the JSON
-    of an Elasticsearch query clause.
+    of an Elasticsearch query clause. A cloudflare rule's query is the JSON of a GraphQL
+    `httpRequestsAdaptiveGroups` filter and its `group_by` lists dimensions, comma separated.
     """
 
     name: str
@@ -113,7 +122,16 @@ async def _series(rule: Rule, telemetry: Telemetry, now: float) -> Sequence[Seri
         return await elasticsearch(telemetry).count(
             rule.index, json.loads(rule.query), window, now, rule.group_by, rule.time_field
         )
+    if rule.kind == "cloudflare":
+        dimensions = tuple(d.strip() for d in (rule.group_by or "").split(",") if d.strip())
+        return await cloudflare(telemetry).count(json.loads(rule.query), window, now, dimensions)
     raise ValueError(f"Unknown rule kind {rule.kind!r}")
+
+
+def cloudflare(telemetry: Telemetry) -> CloudflareTelemetry:
+    if not isinstance(telemetry, CloudflareTelemetry):
+        raise SourceError("cloudflare queries need a cloudflare source")
+    return telemetry
 
 
 def cloudwatch(telemetry: Telemetry) -> CloudWatchTelemetry:

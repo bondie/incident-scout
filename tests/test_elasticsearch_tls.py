@@ -343,7 +343,7 @@ def test_config_reads_elasticsearch_sources_and_both_rule_kinds(tmp_path: Path):
         ("rules: [{name: x, kind: tls, query: 'host', below: 1}]", "host:port"),
         ("rules: [{name: x, kind: tls, query: {a: 1}, below: 1}]", "list of host:port"),
         ("rules: [{name: x, kind: tls, query: ' , ', below: 1}]", "at least one"),
-        ("rules: [{name: x, kind: promql, query: q, group_by: node}]", "only apply"),
+        ("rules: [{name: x, kind: promql, query: q, group_by: node}]", "only appl"),
         ("rules: [{name: x, kind: elasticsearch, query: {a: b}, above: 1, size: 9}]", "unknown"),
     ],
 )
