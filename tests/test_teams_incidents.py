@@ -460,6 +460,11 @@ def test_a_shop_label_without_a_pattern_names_the_shop_as_it_is(tmp_path: Path):
         load_config(tmp_path / "config.yaml")
 
 
+def shown_to_people(card: dict[str, Any]) -> dict[str, Any]:
+    """The card without the collapsed block for a chat bot, which keeps the text exact."""
+    return {**card, "body": [item for item in card["body"] if item.get("id") != "handoff"]}
+
+
 def test_no_text_on_any_card_starts_like_a_numbered_list(store: Store, tmp_path: Path):
     poster = Poster()
     listy = Finding("disk", "shop=a", "warning", "3. pokus selhal\n4. pokus taky", 1.0)
@@ -490,7 +495,7 @@ def test_no_text_on_any_card_starts_like_a_numbered_list(store: Store, tmp_path:
     lines = [
         line
         for card in [*poster.cards, *proposals]
-        for text in runs(content(card))
+        for text in runs(shown_to_people(content(card)))
         for line in text.splitlines()
     ]
     assert lines

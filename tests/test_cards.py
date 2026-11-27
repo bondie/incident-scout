@@ -219,8 +219,10 @@ def test_cards_have_no_stripe_boxes_or_badges(tmp_path: Path):
     store = Store(config.state_path)
     incident_id = store.open(IMPORT, T0)
     store.save_diagnosis(incident_id, DIAGNOSIS.to_json(), T0)
-    shown = json.dumps(card_for(config, store, incident_id))
-    assert '"Container"' not in shown
+    card = card_for(config, store, incident_id)
+    shown = json.dumps(card)
+    visible = [item for item in content(card)["body"] if item.get("id") != "handoff"]
+    assert '"Container"' not in json.dumps(visible)
     assert '"style"' not in shown.replace('"style": "positive"', "")
     assert '"bleed"' not in shown
 
@@ -290,6 +292,7 @@ def test_the_card_counts_records_and_shows_cause_priority_and_id(tmp_path: Path)
         "Schválit ticket",
         "Zamítnout s důvodem",
         "Detail",
+        "Pro bota",
     ]
     assert actions(content(card))[0]["style"] == "positive"
 
@@ -299,7 +302,7 @@ def test_telemetry_joins_the_proposal_actions_when_the_incident_has_a_url(tmp_pa
     store = Store(config.state_path)
     linked = Finding(**{**IMPORT.__dict__, "url": "https://grafana/import"})
     card = card_for(config, store, store.open(linked, T0))
-    assert actions(content(card))[-1] == {
+    assert actions(content(card))[-2] == {
         "type": "Action.OpenUrl",
         "title": "Telemetrie",
         "url": "https://grafana/import",
@@ -640,3 +643,46 @@ def test_the_page_escapes_a_reason_and_ticket(page_server: tuple[str, Store]):
     assert page.status_code == 200
     assert script not in page.text
     assert "Ticket: &lt;script&gt;alert(1)&lt;/script&gt;" in page.text
+
+
+def test_a_proposal_card_carries_a_collapsed_handoff_for_a_chat_bot(tmp_path: Path):
+    config = card_config(tmp_path)
+    store = Store(config.state_path)
+    incident_id = store.open(IMPORT, T0)
+    card = card_for(config, store, incident_id)
+    (block,) = [item for item in content(card)["body"] if item.get("id") == "handoff"]
+    assert block["isVisible"] is False
+    message, ticket = block["items"][1], block["items"][3]
+    assert message["id"] == "handoff.pm_message"
+    assert message["text"] == PROPOSAL.ticket_text()
+    assert ticket["id"] == "handoff.ticket"
+    assert ticket["facts"] == [{"title": "Název", "value": PROPOSAL.title}]
+    toggle = actions(content(card))[-1]
+    assert toggle == {
+        "type": "Action.ToggleVisibility",
+        "targetElements": ["handoff"],
+        "title": "Pro bota",
+    }
+
+
+def test_the_handoff_names_the_jira_project_of_the_shop(tmp_path: Path):
+    config = replace(card_config(tmp_path), jira_projects={"Kovian": "KOV"})
+    store = Store(config.state_path)
+    incident_id = store.open(IMPORT, T0)
+    card = card_for(config, store, incident_id)
+    (block,) = [item for item in content(card)["body"] if item.get("id") == "handoff"]
+    assert block["items"][3]["facts"][0] == {"title": "Projekt", "value": "KOV"}
+
+    (tmp_path / "config.yaml").write_text("jira_projects: [kovian]")
+    with pytest.raises(ConfigError, match="jira_projects must map a shop"):
+        load_config(tmp_path / "config.yaml")
+
+
+def test_the_model_drafts_the_ticket_with_the_shop_name_people_know(tmp_path: Path, calls: Calls):
+    config = card_config(tmp_path, title="Kovian.sk")
+    store = Store(config.state_path)
+    incident = store.incident(store.open(IMPORT, T0))
+    assert incident is not None
+    cli._make_proposal(config, store, incident, T0, send=False)
+    (sent,) = calls.drafts
+    assert sent.splitlines()[:2] == ["## Incident", "shop: Kovian.sk"]

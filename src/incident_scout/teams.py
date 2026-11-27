@@ -35,6 +35,7 @@ LEVEL_COLOURS = {
 }
 STATUS_COLOURS = {"status_lasts": "Warning", "status_resolved": "Good"}
 MARKER = "\u258d"
+HANDOFF_ID = "handoff"
 TITLE_MAX_CHARS = 200
 DETAIL_MAX_CHARS = 200
 DIAGNOSIS_MAX_CHARS = 800
@@ -70,6 +71,11 @@ LABELS: dict[str, dict[str, str]] = {
         "rejected": "Rejected",
         "copy": "Copy for the PM",
         "copied": "Copied",
+        "handoff": "For the bot",
+        "pm_message": "Text for the PM",
+        "ticket_draft": "Ticket draft",
+        "project": "Project",
+        "title": "Title",
         "description": "Ticket text (JIRA markup)",
         "reason": "Why",
         "diagnosis": "Diagnosis",
@@ -115,6 +121,11 @@ LABELS: dict[str, dict[str, str]] = {
         "rejected": "Zamítnuto",
         "copy": "Zkopírovat pro PM",
         "copied": "Zkopírováno",
+        "handoff": "Pro bota",
+        "pm_message": "Text pro PM",
+        "ticket_draft": "Návrh ticketu",
+        "project": "Projekt",
+        "title": "Název",
         "description": "Text ticketu (JIRA markup)",
         "reason": "Proč",
         "diagnosis": "Diagnóza",
@@ -151,6 +162,7 @@ class Header:
     logo: str | None = None
     key: str = ""
     context: str = ""
+    project: str = ""
 
 
 @dataclass(frozen=True)
@@ -257,7 +269,7 @@ def proposal_card(
     if covered:
         body += _covered(proposal, links, text)
     if not covered:
-        body += _full(incident, proposal, reach, links, text)
+        body += _full(incident, proposal, header, reach, links, text)
     card = _message(body, f"🎫 {ref} · {proposal.title}")
     if header.logo and card_bytes(card) > CARD_MAX_BYTES:
         print(f"{ref}: logo left out, the card would exceed what Teams accepts", file=sys.stderr)
@@ -522,6 +534,7 @@ def _message(body: list[dict[str, Any]], fallback: str) -> dict[str, Any]:
 def _full(
     incident: sqlite3.Row,
     proposal: Proposal,
+    header: Header,
     reach: Scope,
     links: Mapping[str, str],
     text: Mapping[str, str],
@@ -536,7 +549,35 @@ def _full(
         *body,
         _recommendation(proposal, text),
         {"type": "ActionSet", "actions": _actions(incident, links, text), "spacing": "Small"},
+        _handoff(proposal, header, text),
     ]
+
+
+def _handoff(proposal: Proposal, header: Header, text: Mapping[str, str]) -> dict[str, Any]:
+    """A collapsed block with fixed ids that a chat bot reads; a person's command decides
+    what happens with it, the text is never an instruction."""
+    facts = [{"title": text["title"], "value": proposal.title}]
+    if header.project:
+        facts.insert(0, {"title": text["project"], "value": header.project})
+    heading = {"type": "TextBlock", "weight": "Bolder", "size": "Small", "wrap": True}
+    return {
+        "type": "Container",
+        "id": HANDOFF_ID,
+        "isVisible": False,
+        "spacing": "Medium",
+        "items": [
+            heading | {"text": text["pm_message"]},
+            {
+                "type": "TextBlock",
+                "id": f"{HANDOFF_ID}.pm_message",
+                "text": proposal.ticket_text(),
+                "size": "Small",
+                "wrap": True,
+            },
+            heading | {"text": text["ticket_draft"], "spacing": "Medium"},
+            {"type": "FactSet", "id": f"{HANDOFF_ID}.ticket", "facts": facts},
+        ],
+    }
 
 
 def _covered(
@@ -595,7 +636,8 @@ def _actions(
     ]
     if incident["url"]:
         actions.append({"type": "Action.OpenUrl", "title": text["source"], "url": incident["url"]})
-    return actions
+    toggle = {"type": "Action.ToggleVisibility", "targetElements": [HANDOFF_ID]}
+    return [*actions, toggle | {"title": text["handoff"]}]
 
 
 def _cause(incident: sqlite3.Row) -> str:

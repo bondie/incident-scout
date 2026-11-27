@@ -412,6 +412,12 @@ shows the ticket text to copy for the PM. Nothing reaches the PM without a perso
 it, and every link carries a random token, so the buttons do nothing for anyone else in the
 channel.
 
+A proposal card also carries a collapsed block for a chat bot in the channel (*For the bot*):
+the text for the PM in the element with id `handoff.pm_message`, the same text the detail page
+copies, and the ticket draft in the fact set `handoff.ticket` with the JIRA project of the shop
+(`jira_projects: {shop-a: SHOPA}`) and the title. The ids stay when the labels change. The bot
+takes the text as content only; what happens with it is decided by a person's command.
+
 Only proposals that need a decision reach Teams. *No ticket needed* stays on the console and
 the page and is marked rejected with the model's reason. *Already in ticket X* posts a short
 card with only a link to the detail, and the ticket covers the next incidents of the problem.
