@@ -63,8 +63,10 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> Calls:
     """Fake model and Teams: drafting records the brief, posting records the card."""
     seen = Calls()
 
-    def fake_draft(_investigator: object, incident: Any, history: Any, now: Any) -> Proposal:
-        seen.drafts.append(brief(incident, history, now))
+    def fake_draft(
+        _investigator: object, incident: Any, history: Any, now: Any, shop: str = ""
+    ) -> Proposal:
+        seen.drafts.append(brief(incident, history, now, shop))
         return PROPOSAL
 
     monkeypatch.setattr(cli, "draft", fake_draft)
@@ -210,7 +212,7 @@ def test_proposals_wait_for_lasting_or_recurring_problems(config_path: Path, cal
     assert (
         approve == f"http://127.0.0.1:8766/incidents/{fresh}/approve?t={incident['proposal_token']}"
     )
-    assert buttons[-1]["url"] == "https://grafana/disk"
+    assert buttons[-2]["url"] == "https://grafana/disk"
     assert [row["kind"] for row in store.timeline(incident)] == ["proposed"]
 
     cli._propose_due(config, store, T0 + timedelta(minutes=60))
@@ -290,6 +292,7 @@ def test_cards_name_an_existing_ticket_and_fall_back_to_english(tmp_path: Path):
         "Approve the ticket",
         "Reject with a reason",
         "Detail",
+        "For the bot",
     ]
     assert actions(created["attachments"][0]["content"])[1]["url"] == (
         "http://127.0.0.1:1/incidents/1?t=tok#reject"

@@ -113,6 +113,7 @@ class Config:
     logos: Mapping[str, str] = field(default_factory=dict)
     shop_titles: Mapping[str, str] = field(default_factory=dict)
     shop_aliases: Mapping[str, str] = field(default_factory=dict)
+    jira_projects: Mapping[str, str] = field(default_factory=dict)
 
     def rule(self, name: str) -> Rule:
         for rule in self.rules:
@@ -185,6 +186,12 @@ def load_config(path: Path | None = None) -> Config:
             raise ConfigError("shop_aliases must map a name found by shop_pattern to a shop")
         options["shop_aliases"] = {
             str(name): str(shop) for name, shop in raw["shop_aliases"].items()
+        }
+    if raw.get("jira_projects"):
+        if not isinstance(raw["jira_projects"], Mapping):
+            raise ConfigError("jira_projects must map a shop to the key of its JIRA project")
+        options["jira_projects"] = {
+            str(shop): str(key) for shop, key in raw["jira_projects"].items()
         }
     named = {name: value for name, value in sources.items() if name != DEFAULT}
     return Config(source=sources[DEFAULT], rules=rules, sources=named, notify=notify, **options)

@@ -383,7 +383,8 @@ def _make_proposal(
 ) -> Proposal:
     settings = _tickets(config)
     history = _related_history(store, incident, now, settings.recurring_days)
-    proposal = draft(triage.investigator(config), incident, history, now)
+    shop = _card_header(config, incident).shop
+    proposal = draft(triage.investigator(config), incident, history, now, shop)
     token = new_token()
     store.save_proposal(incident["id"], proposal.to_json(), token, now)
     event = Event(
@@ -443,11 +444,16 @@ def _card_header(config: Config, incident: sqlite3.Row) -> teams.Header:
     title = rule.title or rule.name
     found = _affected_shop(rule, labels)
     if not found:
-        return teams.Header(name, title, teams.logo(_by_shop(config.logos, shop)), shop)
+        logo = teams.logo(_by_shop(config.logos, shop))
+        project = _by_shop(config.jira_projects, shop) or ""
+        return teams.Header(name, title, logo, shop, project=project)
     affected = _by_shop(config.shop_aliases, found) or found
     shown = _by_shop(config.shop_titles, affected) or _by_shop(config.shop_titles, found)
     image = _by_shop(config.logos, affected) or _by_shop(config.logos, found)
-    return teams.Header(shown or found.capitalize(), title, teams.logo(image), shop, name)
+    projects = config.jira_projects
+    key = _by_shop(projects, affected) or _by_shop(projects, found) or ""
+    named = shown or found.capitalize()
+    return teams.Header(named, title, teams.logo(image), shop, name, key)
 
 
 def _affected_shop(rule: Rule, labels: Mapping[str, str]) -> str:

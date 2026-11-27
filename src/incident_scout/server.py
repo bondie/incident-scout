@@ -172,7 +172,7 @@ def page(incident: sqlite3.Row, language: str, base: str) -> str:
             f"<h2>{escape(text['diagnosis'])}</h2><p>{escape(found.summary)}</p>"
             f"<p><b>{escape(text['cause'])}:</b> {escape(found.likely_cause)}</p>"
         )
-    ticket_text = f"{proposal.title}\n\n{proposal.description}"
+    ticket_text = proposal.ticket_text()
     noted = [
         f"{text['ticket']}: {incident['decision_ticket']}" if incident["decision_ticket"] else "",
         f"{text['decision_reason']}: {incident['decision_reason']}"

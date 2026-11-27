@@ -48,7 +48,7 @@ Recommend one of:
   Similar tickets of other shops are only hints about the cause, never an existing ticket.
 
 Then draft the ticket for the PM, who is not a developer:
-- title: at most 80 characters, name the shop and the symptom.
+- title: at most 80 characters, the shop by its name from the input, then the symptom.
 - priority: low, medium, high or critical, by the impact on customers.
 - description in JIRA wiki markup, never Markdown: h3. headings, *bold*, bullet lists with
   "* ", double curly braces around paths and identifiers such as {{/api/v2/orders}}, and
@@ -82,6 +82,10 @@ class Proposal:
     model: str = ""
     seconds: float = 0.0
 
+    def ticket_text(self) -> str:
+        """What the PM gets: the title, then the description."""
+        return f"{self.title}\n\n{self.description}"
+
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
 
@@ -109,14 +113,17 @@ def draft(
     incident: sqlite3.Row,
     history: Sequence[sqlite3.Row],
     now: datetime,
+    shop: str = "",
 ) -> Proposal:
     system = SYSTEM_PROMPT.replace("{language}", investigator.language)
-    content, seconds = investigator.complete(system, brief(incident, history, now), SCHEMA)
+    content, seconds = investigator.complete(system, brief(incident, history, now, shop), SCHEMA)
     return parse_proposal(content, investigator.model, seconds)
 
 
-def brief(incident: sqlite3.Row, history: Sequence[sqlite3.Row], now: datetime) -> str:
-    """Everything the model may use, as plain text."""
+def brief(
+    incident: sqlite3.Row, history: Sequence[sqlite3.Row], now: datetime, shop: str = ""
+) -> str:
+    """Everything the model may use, as plain text; `shop` is the name people know the shop by."""
     opened = datetime.fromisoformat(incident["opened_at"])
     resolved = incident["resolved_at"]
     status = f"open for {_minutes(now - opened)}"
@@ -124,6 +131,7 @@ def brief(incident: sqlite3.Row, history: Sequence[sqlite3.Row], now: datetime) 
         status = f"resolved after {_minutes(datetime.fromisoformat(resolved) - opened)}"
     lines = [
         "## Incident",
+        *([f"shop: {shop}"] if shop else []),
         f"rule: {incident['rule']} ({incident['severity']})",
         f"alert: {incident['summary']}",
         f"started: {_local(incident['opened_at'])}, {status}",

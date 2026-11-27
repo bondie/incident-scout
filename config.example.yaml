@@ -253,3 +253,5 @@ rules:
 #   shop-a: Shop A                       # `shop_title` wins, else the shop capitalised
 # shop_aliases:                          # a shop found by shop_pattern -> its key in logos
 #   a: shop-a                            # and shop_titles
+# jira_projects:                         # the JIRA project of a ticket proposal, by `shop`,
+#   shop-a: SHOPA                        # in the card's collapsed block for a chat bot
