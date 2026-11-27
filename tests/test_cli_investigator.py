@@ -85,6 +85,7 @@ def test_investigator_config_is_parsed(config_path: Path):
     assert settings.evidence[0].query == 'probe_success{shop=~"prod-.*"}'
     assert "$shop" in settings.evidence[1].query
     assert settings.precedents_command[0] == str(Path.home() / "bin/tp")
+    assert settings.precedents_from == ("Top errors",)
 
 
 @pytest.mark.parametrize(

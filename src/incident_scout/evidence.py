@@ -7,6 +7,7 @@ the same pack can be replayed against different models.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
@@ -18,6 +19,9 @@ from .engine import with_offset
 from .models import Series
 from .rules import cloudwatch
 from .sources.base import Telemetry
+
+_COUNT = re.compile(r"^\s*\d+x\s+")
+_ONE_LABEL = re.compile(r"[\w.]+=(?!.*\s[\w.]+=).*")
 
 EvidenceKind = Literal["promql", "logql", "logql_top", "cloudwatch", "logs_insights", "ecs_events"]
 STEP = 300
@@ -97,7 +101,7 @@ async def collect(
     before: int = 1800,
     after: int = 600,
     precedents: PrecedentFinder | None = None,
-    precedents_from: str | None = None,
+    precedents_from: str | Sequence[str] | None = None,
     now: float | None = None,
 ) -> EvidencePack:
     now = now or time.time()
@@ -125,13 +129,29 @@ async def collect(
     return pack
 
 
-def _search_text(pack: EvidencePack, summary: str, section_name: str | None) -> str:
-    """Seed the precedent search with the top error message when there is one."""
-    section = next((s for s in pack.sections if s.name == section_name), None)
-    if section is None or not section.lines or section.lines[0].startswith("("):
-        return summary
-    line = section.lines[0]
-    return line.split("message=", 1)[1] if "message=" in line else line.strip()
+def _search_text(
+    pack: EvidencePack, summary: str, section_names: str | Sequence[str] | None
+) -> str:
+    """Seed the precedent search with the top line of the first named section that has one,
+    such as the top error message, else with the alert summary."""
+    names = (section_names,) if isinstance(section_names, str) else tuple(section_names or ())
+    found = {s.name: s.lines for s in pack.sections}
+    for name in names:
+        lines = found.get(name) or []
+        if lines and not lines[0].startswith("("):
+            return _seed(lines[0])
+    return summary
+
+
+def _seed(line: str) -> str:
+    """The text of a top line without its count, and without the label name when there is
+    only one label: `24x  nginx_error=upstream timed out` -> `upstream timed out`."""
+    if "message=" in line:
+        return line.split("message=", 1)[1]
+    text = _COUNT.sub("", line).strip()
+    if _ONE_LABEL.fullmatch(text):
+        return text.split("=", 1)[1]
+    return text
 
 
 async def _section(

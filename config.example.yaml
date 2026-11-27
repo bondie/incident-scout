@@ -209,7 +209,8 @@ rules:
 #   max_per_hour: 4
 #   # Similar past tickets from https://github.com/bondie/ticket-precedent
 #   precedents_command: [uv, --directory, ~/ticket-precedent, run, tp, search, --json, --limit, '3']
-#   precedents_from: Top errors in the window
+#   precedents_from: [Top errors in the window, Web server errors in the window]  # the first
+#                                        # of these sections with data seeds the search
 #   evidence:
 #     - name: HTTP 5xx per 5 min
 #       kind: logql

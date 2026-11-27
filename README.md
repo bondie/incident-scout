@@ -348,7 +348,8 @@ by a local model through [Ollama](https://ollama.com), so logs never leave the m
    unrelated exception that happened to be logged; with them, the model tied it to the
    deployment. Similar past tickets come from
    [ticket-precedent](https://github.com/bondie/ticket-precedent), searched with the top
-   error message.
+   line of the first `precedents_from` section that has data (the top error message, else
+   e.g. the web server's error when PHP logged none), else with the alert summary.
 2. **One model call.** The model gets the pack and must answer in a JSON schema: summary,
    scope (one shop or several), category, likely cause, confidence, key evidence and next
    steps. There are no tool calls and no agent loop, because small local models handle those

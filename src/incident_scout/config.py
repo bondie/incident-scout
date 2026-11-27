@@ -59,7 +59,7 @@ class InvestigatorConfig:
     max_per_hour: int = 4
     timeout_seconds: int = 300
     precedents_command: tuple[str, ...] = ()
-    precedents_from: str | None = None
+    precedents_from: tuple[str, ...] = ()
     evidence: tuple[EvidenceQuery, ...] = ()
 
 
@@ -287,6 +287,8 @@ def _investigator(
                 cast(EvidenceQuery, _build(EvidenceQuery, copy, "investigator.evidence"))
             )
     data["evidence"] = tuple(queries)
+    named = data.get("precedents_from") or ()
+    data["precedents_from"] = (named,) if isinstance(named, str) else tuple(map(str, named))
     command = data.get("precedents_command") or ()
     data["precedents_command"] = tuple(
         str(Path(part).expanduser()) if part.startswith("~") else str(part) for part in command
