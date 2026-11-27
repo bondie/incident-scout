@@ -268,3 +268,45 @@ def test_runtimes_without_constrained_output_get_the_schema_in_the_prompt():
         '"scope": one of: single_shop | multiple_shops | unknown'
         in calls[1]["messages"][0]["content"]
     )
+
+
+def test_precedents_search_with_the_first_named_section_that_has_data():
+    telemetry = FakeTelemetry(
+        logs={
+            "php": [],
+            "nginx": [
+                Series(
+                    {"nginx_error": "upstream timed out while connecting to upstream"}, [(0, 24)]
+                )
+            ],
+        }
+    )
+    queries = [
+        EvidenceQuery("Top errors", "logql_top", "php"),
+        EvidenceQuery("Web server errors", "logql_top", "nginx"),
+    ]
+    seen: list[str] = []
+
+    def find(text: str) -> list[str]:
+        seen.append(text)
+        return []
+
+    for named in (("Top errors", "Web server errors"), ("Top errors",), "Missing"):
+        asyncio.run(
+            collect(
+                telemetry,
+                queries,
+                "http-5xx",
+                "critical",
+                "shop-a: 23x HTTP 5xx",
+                {},
+                START,
+                precedents=find,
+                precedents_from=named,
+            )
+        )
+    assert seen == [
+        "upstream timed out while connecting to upstream",
+        "shop-a: 23x HTTP 5xx",
+        "shop-a: 23x HTTP 5xx",
+    ]
